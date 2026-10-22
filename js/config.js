@@ -23,11 +23,20 @@ export const SUPPORT_EMAIL = '';
 // Versi Firebase JS SDK yang dimuat dari CDN resmi (gstatic.com).
 export const FIREBASE_VERSION = '12.19.0';
 
+// Kunci untuk notifikasi pengingat saat aplikasi tertutup (web push).
+// Firebase Console > Project settings > Cloud Messaging > Web Push certificates > Key pair.
+// Kosong = pengingat hanya muncul saat aplikasi sedang terbuka.
+export const FCM_VAPID_KEY = '';
+
+// Batas per paket. Angka-angkanya harus sama dengan firestore.rules dan storage.rules.
+export const PLANS = {
+  free: { label: 'Gratis', photoMax: 5 * 1024 * 1024, quota: 100 * 1024 * 1024, imageMaxSide: 1600, exportRich: false },
+  plus: { label: 'Plus', photoMax: 20 * 1024 * 1024, quota: 5 * 1024 * 1024 * 1024, imageMaxSide: 2560, exportRich: true }
+};
+
 // Batas ukuran file
 export const LIMITS = {
-  imageInputMax: 15 * 1024 * 1024, // file asli yang boleh dipilih
-  imageUploadMax: 5 * 1024 * 1024, // setelah diperkecil, harus sama dengan storage.rules
-  imageMaxSide: 1600,
+  imageInputMax: 40 * 1024 * 1024, // file asli yang boleh dipilih (dikompres sebelum diunggah)
   attachmentsPerNote: 10,
   backupMax: 20 * 1024 * 1024,     // harus sama dengan storage.rules
   backupsKept: 5,

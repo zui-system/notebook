@@ -317,6 +317,31 @@ mark { background: var(--accent-soft); color: inherit; border-radius: 3px; paddi
 .checkrow.done input[type="text"] { text-decoration: line-through; color: var(--muted); }
 .checkrow .iconbtn { color: var(--muted); }
 .addrow { align-self: flex-start; margin: 6px 0 0 4px; }
+.checkrow .itemmain { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.checkrow .itemmain input[type="text"] { width: 100%; }
+.checkrow .duebtn.set { color: var(--accent); }
+
+/* ---------- Tanggal dan pengingat ---------- */
+.due { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 0.82rem; color: var(--muted); padding: 0 2px 8px; }
+.due > span { display: inline-flex; align-items: center; gap: 4px; }
+.due svg { width: 0.95rem; height: 0.95rem; flex: none; }
+.due.late { color: var(--danger); font-weight: 600; }
+.checkrow.done .due { text-decoration: line-through; }
+.quick { display: flex; gap: 8px; flex-wrap: wrap; }
+.quick .btn { flex: 1 1 auto; }
+.stack-sm { display: flex; flex-direction: column; gap: 10px; }
+
+.agenda { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.agrow { display: flex; align-items: stretch; background: var(--surface); border: var(--border-w) solid var(--line); border-radius: var(--radius); }
+.agrow label.box { width: 52px; display: inline-flex; align-items: center; justify-content: center; flex: none; cursor: pointer; }
+.agrow input[type="checkbox"] { width: 1.6rem; height: 1.6rem; accent-color: var(--accent); cursor: pointer; margin: 0; }
+.agrow .agmain { flex: 1; min-width: 0; min-height: 56px; border: none; background: transparent; text-align: left; padding: 10px 14px 10px 2px; display: flex; flex-direction: column; justify-content: center; gap: 2px; color: var(--ink); border-radius: 0 var(--radius) var(--radius) 0; }
+.agrow .agmain:hover { background: var(--hover); }
+.agrow .txt { font-size: 1.05rem; font-weight: 600; overflow-wrap: anywhere; }
+.agrow .meta { font-size: 0.85rem; color: var(--muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.agrow .meta .bell svg { width: 0.95rem; height: 0.95rem; display: block; }
+.agrow.late .meta { color: var(--danger); font-weight: 600; }
+.home #home-today { margin-top: 4px; }
 
 .attachments { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin: 16px 0; }
 .attachments figure { margin: 0; border: var(--border-w) solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--surface); }

@@ -16,7 +16,7 @@ export const THEMES = [
   { id: 'ceria', label: 'Ceria Lembut', colors: ['#FBF1E6', '#B8430F', '#E7D8F5'], meta: '#FBF1E6' }
 ];
 
-export const DEFAULTS = { fontSize: 'sedang', theme: 'terang', highContrast: false, labels: false };
+export const DEFAULTS = { fontSize: 'sedang', theme: 'terang', highContrast: false, labels: false, reminders: true };
 
 const listeners = new Set();
 
@@ -31,6 +31,7 @@ export function sanitize(s) {
   if (s && THEMES.some(t => t.id === s.theme)) o.theme = s.theme;
   if (s && typeof s.highContrast === 'boolean') o.highContrast = s.highContrast;
   if (s && typeof s.labels === 'boolean') o.labels = s.labels;
+  if (s && typeof s.reminders === 'boolean') o.reminders = s.reminders;
   return o;
 }
 

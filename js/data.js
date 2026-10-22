@@ -4,6 +4,8 @@ import { LocalStore } from './store/local.js';
 import { SearchIndex, normalize } from './search.js';
 import { LIMITS } from './config.js';
 import { settings, onSettings } from './settings.js';
+import { REPEATS, reminderBase, nextOccurrence, reminderId, advanceDue } from './recur.js';
+import { scheduleLocal } from './reminders.js';
 
 export const search = new SearchIndex();
 let store = null;
@@ -16,6 +18,7 @@ function emit(what) {
   if (!store) return;
   search.sync(store.notes, store.notebooks);
   listeners.forEach(fn => fn(what));
+  scheduleReminderSync();
 }
 
 export const newId = () => (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now()).replace(/-/g, '').slice(0, 20);
@@ -38,7 +41,7 @@ export function cleanNote(n) {
   o.title = String(o.title || '').slice(0, 300);
   o.body = String(o.body || '').slice(0, 50000);
   o.type = o.type === 'checklist' ? 'checklist' : 'text';
-  o.items = (Array.isArray(o.items) ? o.items : []).slice(0, 300).map(i => ({ id: String(i.id || newId()).slice(0, 40), text: String(i.text || '').slice(0, 1000), done: !!i.done }));
+  o.items = (Array.isArray(o.items) ? o.items : []).slice(0, 300).map(cleanItem);
   o.notebookId = typeof o.notebookId === 'string' && o.notebookId ? o.notebookId.slice(0, 40) : null;
   o.tags = [...new Set((Array.isArray(o.tags) ? o.tags : []).map(normTag).filter(Boolean))].slice(0, 20);
   o.pinned = !!o.pinned;
@@ -48,6 +51,19 @@ export function cleanNote(n) {
   o.editedAt = typeof o.editedAt === 'number' ? o.editedAt : Date.now();
   o.attachments = (Array.isArray(o.attachments) ? o.attachments : []).slice(0, LIMITS.attachmentsPerNote)
     .map(a => ({ path: String(a.path), url: String(a.url), size: Number(a.size) || 0 }));
+  return o;
+}
+
+// Item checklist. Field tanggal hanya ditulis bila item punya tanggal,
+// jadi item tanpa tanggal tetap persis seperti Tahap 1.
+export function cleanItem(i) {
+  const o = { id: String(i.id || newId()).slice(0, 40), text: String(i.text || '').slice(0, 1000), done: !!i.done };
+  if (typeof i.due === 'number' && isFinite(i.due)) {
+    o.due = Math.round(i.due);
+    o.hasTime = !!i.hasTime;
+    o.repeat = REPEATS.includes(i.repeat) ? i.repeat : null;
+    o.remind = !!i.remind;
+  }
   return o;
 }
 
@@ -82,7 +98,7 @@ async function attach(s) {
   store = s;
   store.onChange(what => emit(what));
   if (unsubSettings) unsubSettings();
-  unsubSettings = onSettings((st, fromRemote) => { if (!fromRemote && store) store.saveSettings(st); });
+  unsubSettings = onSettings((st, fromRemote) => { if (!fromRemote && store) store.saveSettings(st); scheduleReminderSync(); });
   if (!(await store.getFlag('sample'))) {
     await createSample();
     await store.setFlag('sample', true);
@@ -202,6 +218,89 @@ export async function purgeTrash() {
 
 export function daysLeftInTrash(n) {
   return Math.max(0, Math.ceil((n.deletedAt + LIMITS.trashDays * 86400000 - Date.now()) / 86400000));
+}
+
+// ---- Tanggal dan pengingat pada item checklist ----
+const DAY = 86400000;
+export function startOfDay(ms = Date.now()) { const d = new Date(ms); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); }
+export function addDays(dayStart, n) { const d = new Date(dayStart); return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n).getTime(); }
+
+// Mencentang item. Item berulang tidak menjadi selesai, tetapi maju ke jadwal berikutnya.
+// Mengembalikan tanggal baru bila item maju, selain itu null.
+export function applyDone(item, done, now = Date.now()) {
+  if (done && item.repeat && typeof item.due === 'number') {
+    item.due = advanceDue(item, now, new Date(item.due).getTimezoneOffset());
+    item.done = false;
+    return item.due;
+  }
+  item.done = !!done;
+  return null;
+}
+
+export function updateItem(noteId, itemId, fn) {
+  const n = getNote(noteId);
+  if (!n) return null;
+  const items = (n.items || []).map(i => ({ ...i }));
+  const it = items.find(i => i.id === itemId);
+  if (!it) return null;
+  const result = fn(it);
+  updateNote(noteId, { items });
+  return result;
+}
+
+export const setItemDone = (noteId, itemId, done) => updateItem(noteId, itemId, it => applyDone(it, done));
+export const setItemRemind = (noteId, itemId, remind) => updateItem(noteId, itemId, it => { it.remind = !!remind; return true; });
+
+// Item bertanggal yang belum selesai, dari catatan checklist yang aktif (bukan arsip/sampah).
+export function datedItems() {
+  const out = [];
+  for (const n of allNotes()) {
+    if (n.deletedAt || n.archived || n.type !== 'checklist') continue;
+    for (const it of n.items || []) if (typeof it.due === 'number' && !it.done && it.text.trim()) out.push({ note: n, item: it });
+  }
+  return out.sort((a, b) => a.item.due - b.item.due || (b.item.hasTime ? 0 : 1) - (a.item.hasTime ? 0 : 1));
+}
+
+export function agenda(now = Date.now()) {
+  const today = startOfDay(now), tomorrow = addDays(today, 1);
+  const res = { overdue: [], today: [], upcoming: [] };
+  for (const e of datedItems()) {
+    if (e.item.due < today) res.overdue.push(e);
+    else if (e.item.due < tomorrow) res.today.push(e);
+    else res.upcoming.push(e);
+  }
+  return res;
+}
+
+export function countToday() { const a = agenda(); return a.overdue.length + a.today.length; }
+export function hasDatedItems() { return allNotes().some(n => !n.deletedAt && n.type === 'checklist' && (n.items || []).some(i => typeof i.due === 'number')); }
+
+// Jadwal pengingat yang seharusnya ada, dihitung ulang dari catatan.
+export function desiredReminders(now = Date.now()) {
+  const out = new Map();
+  if (!store || !settings.reminders) return out;
+  for (const { note, item } of datedItems()) {
+    if (!item.remind) continue;
+    const base = reminderBase(item);
+    const tz = new Date(base).getTimezoneOffset();
+    const at = nextOccurrence(base, item.repeat, tz, now);
+    if (at === null) continue;
+    out.set(reminderId(note.id, item.id), {
+      noteId: note.id, itemId: item.id, title: noteTitle(note).slice(0, 120), text: item.text.trim().slice(0, 200),
+      at, base, repeat: item.repeat || null, tz
+    });
+  }
+  return out;
+}
+
+let remTimer = null;
+function scheduleReminderSync() { clearTimeout(remTimer); remTimer = setTimeout(syncReminders, 500); }
+export function syncReminders() {
+  clearTimeout(remTimer);
+  if (!store) return;
+  const want = desiredReminders();
+  scheduleLocal([...want.values()]);
+  if (store.syncReminders) store.syncReminders(want);
 }
 
 // ---- Notebook ----

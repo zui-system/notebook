@@ -39,14 +39,14 @@ function isCurrent(name, arg) {
   return r.name === name && (arg === undefined || r.arg === arg);
 }
 
-function item({ icon: ic, label, route, n, dot }, nav) {
+function item({ icon: ic, label, route, n, dot, unit = 'catatan' }, nav) {
   const [name, arg] = route;
   return h('a', {
     href: '#/' + [name, arg].filter(Boolean).map(encodeURIComponent).join('/'),
     class: 'menu-item',
     'aria-current': isCurrent(name, arg === undefined ? undefined : arg) ? 'page' : null,
     onClick: e => { e.preventDefault(); nav(name, arg); }
-  }, dot ? h('span', { class: 'dot', 'aria-hidden': 'true' }) : icon(ic), h('span', { class: 'grow' }, label), n !== undefined ? h('span', { class: 'n', 'aria-label': `${n} catatan` }, String(n)) : null);
+  }, dot ? h('span', { class: 'dot', 'aria-hidden': 'true' }) : icon(ic), h('span', { class: 'grow' }, label), n !== undefined ? h('span', { class: 'n', 'aria-label': `${n} ${unit}` }, String(n)) : null);
 }
 
 function fill(body) {
@@ -56,7 +56,10 @@ function fill(body) {
   body.appendChild(h('button', { type: 'button', class: 'dsearch', onClick: () => nav('cari') }, icon('search'), 'Cari catatan'));
   body.appendChild(h('div', { class: 'menu-list' },
     item({ icon: 'notes', label: 'Semua catatan', route: ['semua'], n: data.countIn('semua') }, nav),
-    item({ icon: 'pin', label: 'Disematkan', route: ['disematkan'], n: data.countIn('disematkan') }, nav)
+    item({ icon: 'pin', label: 'Disematkan', route: ['disematkan'], n: data.countIn('disematkan') }, nav),
+    // Baru muncul setelah ada item checklist bertanggal, agar menu tetap ringkas.
+    data.hasDatedItems() ? item({ icon: 'sun', label: 'Hari ini', route: ['hari-ini'], n: data.countToday(), unit: 'tugas' }, nav) : null,
+    data.hasDatedItems() ? item({ icon: 'calendar', label: 'Akan datang', route: ['akan-datang'], n: data.agenda().upcoming.length, unit: 'tugas' }, nav) : null
   ));
 
   body.appendChild(h('div', { class: 'group' },

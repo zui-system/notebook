@@ -7,6 +7,8 @@ rules_version = '2';
 //   users/{uid}/notes/{noteId}   catatan
 //   users/{uid}/notebooks/{id}   notebook
 //   users/{uid}/backups/{id}     daftar cadangan (isi file ada di Storage)
+//   users/{uid}/reminders/{id}   jadwal pengingat (dibaca server untuk mengirim notifikasi)
+//   users/{uid}/devices/{id}     alamat notifikasi tiap perangkat
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -21,11 +23,12 @@ service cloud.firestore {
     // ---------- Profil ----------
     function validSettings(s) {
       return s is map
-        && s.keys().hasOnly(['fontSize', 'theme', 'highContrast', 'labels'])
+        && s.keys().hasOnly(['fontSize', 'theme', 'highContrast', 'labels', 'reminders'])
         && (!('fontSize' in s) || s.fontSize in ['kecil', 'sedang', 'besar', 'sangat-besar'])
         && (!('theme' in s) || s.theme in ['terang', 'gelap', 'ceria'])
         && (!('highContrast' in s) || s.highContrast is bool)
-        && (!('labels' in s) || s.labels is bool);
+        && (!('labels' in s) || s.labels is bool)
+        && (!('reminders' in s) || s.reminders is bool);
     }
 
     function validProfile(d) {
@@ -54,9 +57,16 @@ service cloud.firestore {
       allow delete: if false;
 
       // ---------- Catatan ----------
+      function isRepeat(v) { return v == null || v in ['harian', 'mingguan', 'bulanan']; }
+
+      // Item checklist; tanggal, ulangan, dan pengingat bersifat opsional.
       function validItem(i) {
-        return i is map && i.keys().hasOnly(['id', 'text', 'done'])
-          && isStr(i.id, 40) && isStr(i.text, 1000) && i.done is bool;
+        return i is map && i.keys().hasOnly(['id', 'text', 'done', 'due', 'hasTime', 'repeat', 'remind'])
+          && isStr(i.id, 40) && isStr(i.text, 1000) && i.done is bool
+          && (i.get('due', null) == null || i.due is number)
+          && (!('hasTime' in i) || i.hasTime is bool)
+          && isRepeat(i.get('repeat', null))
+          && (!('remind' in i) || i.remind is bool);
       }
 
       function validNote(d) {
@@ -96,6 +106,41 @@ service cloud.firestore {
           && request.resource.data.name is string
           && request.resource.data.name.size() > 0
           && request.resource.data.name.size() <= 60
+          && request.resource.data.createdAt is number
+          && (!('updatedAt' in request.resource.data) || request.resource.data.updatedAt == request.time);
+      }
+
+      // ---------- Jadwal pengingat ----------
+      // Ditulis aplikasi dari item bertanggal; server (Admin SDK) yang mengirim notifikasi
+      // lalu memajukan atau menghapus jadwal.
+      match /reminders/{rid} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if isOwner(uid)
+          && rid.size() <= 40
+          && request.resource.data.keys().hasOnly(['noteId', 'itemId', 'title', 'text', 'at', 'base', 'repeat', 'tz', 'updatedAt'])
+          && request.resource.data.keys().hasAll(['noteId', 'itemId', 'text', 'at', 'base', 'tz'])
+          && isStr(request.resource.data.noteId, 40)
+          && isStr(request.resource.data.itemId, 40)
+          && (!('title' in request.resource.data) || isStr(request.resource.data.title, 120))
+          && isStr(request.resource.data.text, 200)
+          && request.resource.data.at is number
+          && request.resource.data.base is number
+          && isRepeat(request.resource.data.get('repeat', null))
+          && request.resource.data.tz is int
+          && request.resource.data.tz >= -840 && request.resource.data.tz <= 840
+          && (!('updatedAt' in request.resource.data) || request.resource.data.updatedAt == request.time);
+      }
+
+      // ---------- Perangkat penerima notifikasi ----------
+      match /devices/{deviceId} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if isOwner(uid)
+          && deviceId.size() <= 40
+          && request.resource.data.keys().hasOnly(['token', 'label', 'createdAt', 'updatedAt'])
+          && request.resource.data.token is string
+          && request.resource.data.token.size() > 0
+          && request.resource.data.token.size() <= 4096
+          && isStr(request.resource.data.label, 80)
           && request.resource.data.createdAt is number
           && (!('updatedAt' in request.resource.data) || request.resource.data.updatedAt == request.time);
       }

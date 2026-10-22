@@ -82,3 +82,40 @@ test('storage: hanya pemilik, batas 5 MB, hanya gambar', async () => {
   await assertFails(uploadBytes(ref(asBudi().storage(), 'users/ani/attachments/n1/d.jpg'), small, { contentType: 'image/jpeg' }));
   await assertFails(getBytes(ref(asBudi().storage(), 'users/ani/attachments/n1/a.jpg')));
 });
+
+// ---------- Tahap 2: tanggal & pengingat ----------
+const reminder = () => ({ noteId: 'n1', itemId: 'i1', title: 'Obat ibu', text: 'Vitamin', at: Date.now() + 60000, base: Date.now() + 60000, repeat: 'harian', tz: -420, updatedAt: serverTimestamp() });
+
+test('item checklist boleh punya tanggal, ulangan, dan pengingat', async () => {
+  const db = asAni().firestore();
+  const items = [{ id: 'i1', text: 'Vitamin', done: false, due: Date.now(), hasTime: true, repeat: 'harian', remind: true }, { id: 'i2', text: 'Tanpa tanggal', done: false }];
+  await assertSucceeds(setDoc(doc(db, 'users/ani/notes/n1'), { ...note(), type: 'checklist', items }));
+  await assertFails(setDoc(doc(db, 'users/ani/notes/n2'), { ...note(), type: 'checklist', items: [{ ...items[0], repeat: 'tiap jam' }] }));
+  await assertFails(setDoc(doc(db, 'users/ani/notes/n3'), { ...note(), type: 'checklist', items: [{ ...items[0], due: 'besok' }] }));
+  await assertFails(setDoc(doc(db, 'users/ani/notes/n4'), { ...note(), type: 'checklist', items: [{ ...items[0], admin: true }] }));
+});
+test('pengaturan boleh menyimpan sakelar pengingat', async () => {
+  const db = asAni().firestore();
+  await setDoc(doc(db, 'users/ani'), profile());
+  await assertSucceeds(updateDoc(doc(db, 'users/ani'), { settings: { reminders: false }, updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(doc(db, 'users/ani'), { settings: { reminders: 'tidak' }, updatedAt: serverTimestamp() }));
+});
+test('jadwal pengingat: hanya pemilik, bentuk dibatasi', async () => {
+  const db = asAni().firestore();
+  await assertSucceeds(setDoc(doc(db, 'users/ani/reminders/r1'), reminder()));
+  await assertSucceeds(getDoc(doc(db, 'users/ani/reminders/r1')));
+  await assertFails(setDoc(doc(db, 'users/ani/reminders/r2'), { ...reminder(), repeat: 'tiap jam' }));
+  await assertFails(setDoc(doc(db, 'users/ani/reminders/r3'), { ...reminder(), tz: 5000 }));
+  await assertFails(setDoc(doc(db, 'users/ani/reminders/r4'), { ...reminder(), text: 'x'.repeat(201) }));
+  await assertFails(setDoc(doc(db, 'users/ani/reminders/r5'), { ...reminder(), kirimKe: 'semua' }));
+  await assertFails(getDoc(doc(asBudi().firestore(), 'users/ani/reminders/r1')));
+  await assertFails(setDoc(doc(asBudi().firestore(), 'users/ani/reminders/r6'), reminder()));
+  await assertSucceeds(deleteDoc(doc(db, 'users/ani/reminders/r1')));
+});
+test('perangkat penerima notifikasi: hanya pemilik', async () => {
+  const dev = { token: 'tok', label: 'Android · Chrome', createdAt: Date.now(), updatedAt: serverTimestamp() };
+  await assertSucceeds(setDoc(doc(asAni().firestore(), 'users/ani/devices/d1'), dev));
+  await assertFails(setDoc(doc(asAni().firestore(), 'users/ani/devices/d2'), { ...dev, token: '' }));
+  await assertFails(getDoc(doc(asBudi().firestore(), 'users/ani/devices/d1')));
+  await assertFails(setDoc(doc(asBudi().firestore(), 'users/ani/devices/d3'), dev));
+});

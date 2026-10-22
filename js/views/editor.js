@@ -1,8 +1,9 @@
 // Penulis catatan: teks atau checklist. Tersimpan otomatis.
-import { h, icon, iconButton, clear, toast, fmtDateTime } from '../dom.js';
+import { h, icon, iconButton, clear, toast, fmtDateTime, fmtDue } from '../dom.js';
 import * as data from '../data.js';
 import { go, back } from '../nav.js';
 import { confirmDialog, promptDialog, menuSheet } from './dialogs.js';
+import { dueDialog, applyDue, dueLine, prepareNotifications } from './due.js';
 
 function autoGrow(el) {
   el.style.height = 'auto';
@@ -112,9 +113,22 @@ export function editorView(id, { notebookId = null } = {}) {
       const list = h('ul', { class: 'checklist', 'aria-label': 'Daftar periksa' });
       draft.items.forEach((it, idx) => {
         const cb = h('input', { type: 'checkbox', id: 'cb-' + it.id, checked: it.done, disabled: ro,
-          onChange: e => { it.done = e.target.checked; row.classList.toggle('done', it.done); changed(); } });
+          onChange: e => {
+            const next = data.applyDone(it, e.target.checked);
+            changed();
+            if (next) {
+              // Item berulang: tidak dicoret, tanggalnya maju ke jadwal berikutnya.
+              renderContent();
+              const again = content.querySelector('#cb-' + CSS.escape(it.id));
+              if (again) again.focus();
+              toast(`Bagus! Berikutnya: ${fmtDue(next, it.hasTime)}.`);
+              return;
+            }
+            row.classList.toggle('done', it.done);
+          } });
         const txt = h('input', {
           type: 'text', value: it.text, 'aria-label': `Item ${idx + 1}`, readOnly: ro, maxlength: 1000, 'data-id': it.id,
+          'aria-describedby': typeof it.due === 'number' ? 'due-' + it.id : null,
           onInput: e => { it.text = e.target.value; changed(); },
           onKeydown: e => {
             if (e.key === 'Enter') { e.preventDefault(); addItem(idx + 1); }
@@ -128,7 +142,8 @@ export function editorView(id, { notebookId = null } = {}) {
         if (ro) txt.readOnly = true;
         const row = h('li', { class: 'checkrow' + (it.done ? ' done' : '') },
           h('label', { class: 'box', for: 'cb-' + it.id }, cb, h('span', { class: 'sr-only' }, `Selesai: item ${idx + 1}`)),
-          txt,
+          h('div', { class: 'itemmain' }, txt, dueLine(it, 'due-' + it.id)),
+          ro ? null : iconButton({ icon: 'calendar', cls: 'duebtn' + (typeof it.due === 'number' ? ' set' : ''), label: `${typeof it.due === 'number' ? 'Ubah' : 'Atur'} tanggal item ${idx + 1}`, onClick: () => editDue(it) }),
           ro ? null : iconButton({ icon: 'close', label: `Hapus item ${idx + 1}`, onClick: () => { draft.items.splice(idx, 1); changed(); renderContent(); } })
         );
         list.appendChild(row);
@@ -148,6 +163,20 @@ export function editorView(id, { notebookId = null } = {}) {
       content.appendChild(body);
       requestAnimationFrame(() => autoGrow(body));
     }
+  }
+
+  async function editDue(it) {
+    const res = await dueDialog(it);
+    if (!res) return;
+    applyDue(it, res);
+    changed();
+    flush();
+    renderContent();
+    const btn = [...content.querySelectorAll('.duebtn')][draft.items.indexOf(it)];
+    if (btn) btn.focus();
+    if (res.clear) { toast('Tanggal dihapus.'); return; }
+    toast(`${res.remind ? 'Pengingat dipasang' : 'Tanggal disimpan'}: ${fmtDue(it.due, it.hasTime)}.`);
+    if (res.remind) await prepareNotifications();
   }
 
   function addItem(at) {
