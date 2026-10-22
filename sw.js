@@ -1,6 +1,6 @@
 // Service worker: aplikasi tetap terbuka tanpa internet.
 // Ganti VERSION setiap kali merilis versi baru agar file lama diperbarui.
-const VERSION = 'zn-v1.0.0';
+const VERSION = 'zn-v1.0.1';
 const SHELL = [
   './',
   'index.html',

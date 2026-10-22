@@ -471,3 +471,15 @@ dialog.sheet { margin-bottom: 0; border-radius: var(--radius-lg) var(--radius-lg
 }
 .toast.show { display: flex; }
 .toast button { background: none; border: none; color: inherit; font-weight: 700; text-decoration: underline; min-height: 40px; padding: 0 4px; }
+
+/* ---------- Layar lebar (PC / tablet mendatar) ---------- */
+@media (min-width: 900px) {
+  .shell { max-width: none; }
+  .topbar { padding-left: 24px; padding-right: 24px; }
+  .main { padding: 0 32px 40px; }
+  .notes { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+  .notes > li { display: flex; }
+  .notes > li > .card { flex: 1; }
+  /* Editor tetap selebar teks yang nyaman dibaca, di tengah layar */
+  .editor { width: 100%; max-width: 900px; margin: 0 auto; }
+}
