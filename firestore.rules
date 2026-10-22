@@ -1,0 +1,123 @@
+rules_version = '2';
+
+// Zui Notebook — aturan keamanan Firestore
+// Prinsip: setiap data hanya bisa dibaca dan ditulis oleh pemiliknya sendiri.
+// Struktur:
+//   users/{uid}                  profil (plan dikunci, tidak bisa diubah pengguna)
+//   users/{uid}/notes/{noteId}   catatan
+//   users/{uid}/notebooks/{id}   notebook
+//   users/{uid}/backups/{id}     daftar cadangan (isi file ada di Storage)
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function isStr(v, max) { return v is string && v.size() <= max; }
+    function isOptId(v) { return v == null || (v is string && v.size() > 0 && v.size() <= 40); }
+
+    // ---------- Profil ----------
+    function validSettings(s) {
+      return s is map
+        && s.keys().hasOnly(['fontSize', 'theme', 'highContrast', 'labels'])
+        && (!('fontSize' in s) || s.fontSize in ['kecil', 'sedang', 'besar', 'sangat-besar'])
+        && (!('theme' in s) || s.theme in ['terang', 'gelap', 'ceria'])
+        && (!('highContrast' in s) || s.highContrast is bool)
+        && (!('labels' in s) || s.labels is bool);
+    }
+
+    function validProfile(d) {
+      return d.keys().hasOnly(['displayName', 'email', 'plan', 'settings', 'flags', 'createdAt', 'updatedAt'])
+        && d.keys().hasAll(['plan', 'createdAt'])
+        && (!('displayName' in d) || isStr(d.displayName, 100))
+        && (!('email' in d) || isStr(d.email, 200))
+        && (!('settings' in d) || validSettings(d.settings))
+        && (!('flags' in d) || (d.flags is map && d.flags.size() <= 20))
+        && d.createdAt is number
+        && (!('updatedAt' in d) || d.updatedAt == request.time);
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+      // Profil baru selalu dimulai dengan paket "free".
+      allow create: if isOwner(uid)
+        && validProfile(request.resource.data)
+        && request.resource.data.plan == 'free';
+      // Pengguna boleh mengubah profil, tetapi TIDAK boleh mengubah plan dan createdAt.
+      // (Plan nanti diubah oleh server/Cloud Functions saat ada pembayaran.)
+      allow update: if isOwner(uid)
+        && validProfile(request.resource.data)
+        && request.resource.data.plan == resource.data.plan
+        && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if false;
+
+      // ---------- Catatan ----------
+      function validItem(i) {
+        return i is map && i.keys().hasOnly(['id', 'text', 'done'])
+          && isStr(i.id, 40) && isStr(i.text, 1000) && i.done is bool;
+      }
+
+      function validNote(d) {
+        return d.keys().hasOnly(['title', 'body', 'type', 'items', 'notebookId', 'tags', 'pinned',
+                                 'archived', 'deletedAt', 'createdAt', 'editedAt', 'attachments', 'updatedAt'])
+          && d.keys().hasAll(['title', 'body', 'type', 'items', 'pinned', 'archived', 'createdAt', 'editedAt'])
+          && isStr(d.title, 300)
+          && isStr(d.body, 50000)
+          && d.type in ['text', 'checklist']
+          && d.items is list && d.items.size() <= 300
+          // Firestore rules tidak bisa memeriksa setiap isi list; dua item pertama diperiksa
+          // sebagai contoh bentuk, ukuran total tetap dibatasi oleh batas dokumen 1 MB.
+          && (d.items.size() == 0 || validItem(d.items[0]))
+          && (d.items.size() < 2 || validItem(d.items[1]))
+          && isOptId(d.get('notebookId', null))
+          && (!('tags' in d) || (d.tags is list && d.tags.size() <= 20))
+          && d.pinned is bool
+          && d.archived is bool
+          && (d.get('deletedAt', null) == null || d.deletedAt is number)
+          && d.createdAt is number
+          && d.editedAt is number
+          && (!('attachments' in d) || (d.attachments is list && d.attachments.size() <= 10))
+          && (!('updatedAt' in d) || d.updatedAt == request.time);
+      }
+
+      match /notes/{noteId} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if isOwner(uid) && noteId.size() <= 40 && validNote(request.resource.data);
+      }
+
+      // ---------- Notebook ----------
+      match /notebooks/{nbId} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if isOwner(uid)
+          && nbId.size() <= 40
+          && request.resource.data.keys().hasOnly(['name', 'createdAt', 'updatedAt'])
+          && request.resource.data.name is string
+          && request.resource.data.name.size() > 0
+          && request.resource.data.name.size() <= 60
+          && request.resource.data.createdAt is number
+          && (!('updatedAt' in request.resource.data) || request.resource.data.updatedAt == request.time);
+      }
+
+      // ---------- Daftar cadangan ----------
+      match /backups/{backupId} {
+        allow read, delete: if isOwner(uid);
+        allow create: if isOwner(uid)
+          && request.resource.data.keys().hasOnly(['createdAt', 'path', 'count', 'size', 'auto'])
+          && request.resource.data.createdAt is number
+          && request.resource.data.path == 'users/' + uid + '/backups/' + backupId + '.json'
+          && request.resource.data.count is int
+          && request.resource.data.size is int
+          && request.resource.data.size <= 20 * 1024 * 1024
+          && request.resource.data.auto is bool;
+        allow update: if false;
+      }
+    }
+
+    // Semua jalur lain tertutup.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

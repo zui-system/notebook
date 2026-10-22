@@ -1,0 +1,40 @@
+rules_version = '2';
+
+// Zui Notebook — aturan keamanan Firebase Storage
+// Setiap file hanya bisa dibaca, diunggah, dan dihapus oleh pemiliknya.
+// Ukuran dan jenis file dibatasi.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    // Gambar lampiran catatan: maks 5 MB, hanya gambar.
+    match /users/{uid}/attachments/{noteId}/{fileName} {
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid)
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp|gif)');
+      allow update: if false;
+      allow delete: if isOwner(uid);
+    }
+
+    // File cadangan: maks 20 MB, hanya JSON.
+    match /users/{uid}/backups/{fileName} {
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid)
+        && fileName.matches('[0-9]+[.]json')
+        && request.resource.size <= 20 * 1024 * 1024
+        && request.resource.contentType == 'application/json';
+      allow update: if false;
+      allow delete: if isOwner(uid);
+    }
+
+    // Semua jalur lain tertutup.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
