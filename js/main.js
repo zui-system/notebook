@@ -6,6 +6,8 @@ import { parseRoute, go } from './nav.js';
 import { hasFirebase, loadFirebase } from './firebase.js';
 import { homeView, listView, searchView } from './views/lists.js';
 import { editorView } from './views/editor.js';
+import { agendaView } from './views/agenda.js';
+import * as reminders from './reminders.js';
 import { settingsView } from './views/settings.js';
 import { onboardingView, loginView, profileDialog, avatar } from './views/auth.js';
 import { openDrawer, closeDrawer } from './views/drawer.js';
@@ -185,8 +187,11 @@ function enterApp() {
   mount(h('div', { class: 'shell' }, topSlot, main));
   shell = { topSlot, main };
   data.onData(() => render());
+  data.onNotice(msg => toast(msg));
   render(true);
   setTimeout(() => data.autoBackup(), 4000);
+  // Perangkat yang sudah mengizinkan notifikasi: perbarui alamat notifikasinya bila berubah.
+  setTimeout(() => reminders.enablePush(data.getStore()), 2500);
 }
 
 function defaultTopbar() {
@@ -207,6 +212,7 @@ function makeView(r) {
       return { ...listView(r.name), title: null };
     case 'notebook': return { ...listView('notebook', r.arg), title: null };
     case 'tag': return { ...listView('tag', r.arg), title: null };
+    case 'hari-ini': case 'akan-datang': return { ...agendaView(r.name), title: null };
     case 'cari': return { ...searchView(), title: 'Cari', selfFocus: true };
     case 'baru': { const v = editorView(null, { notebookId: r.arg }); return { ...v, title: 'Catatan baru', selfFocus: true, key: () => v.noteId && v.noteId() ? 'catatan/' + v.noteId() : 'baru/' + (r.arg || '') }; }
     case 'catatan': { const v = editorView(r.arg); return { ...v, title: 'Catatan', selfFocus: true }; }
@@ -218,6 +224,17 @@ function makeView(r) {
 function render(force = false) {
   if (!shell) return;
   const r = parseRoute();
+  // Dari tombol "Matikan pengingat" pada notifikasi.
+  if (r.name === 'matikan-pengingat') {
+    const [noteId, itemId] = [r.arg, r.parts[2]];
+    const exists = !!(noteId && data.getNote(noteId));
+    // Ganti rute dulu: mengubah data memicu tampilan ulang, dan rute ini tidak boleh diproses dua kali.
+    go(exists ? 'catatan' : 'hari-ini', exists ? noteId : null, { replace: true });
+    if (exists && data.setItemRemind(noteId, itemId, false)) {
+      toast('Pengingat untuk item ini dimatikan.', { label: 'Batalkan', run: () => data.setItemRemind(noteId, itemId, true) });
+    }
+    return;
+  }
   const key = r.name + '/' + (r.arg || '');
   if (!force && view && (key === viewKey || (view.key && view.key() === key))) {
     viewKey = key;
@@ -251,6 +268,8 @@ async function signOut() {
   });
   if (!ok) return;
   if (view && view.destroy) view.destroy();
+  // Perangkat ini berhenti menerima pengingat akun ini.
+  await Promise.race([reminders.disablePush(data.getStore()), new Promise(r => setTimeout(r, 3000))]);
   // Pastikan perubahan terakhir sudah terkirim sebelum cache perangkat dibersihkan.
   const sent = await Promise.race([
     fb.F.waitForPendingWrites(fb.db).then(() => true).catch(() => false),
@@ -284,6 +303,10 @@ function watchConnection() {
 
 function registerServiceWorker() {
   if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
+  // Notifikasi diketuk saat aplikasi sudah terbuka: pindah ke catatannya.
+  navigator.serviceWorker.addEventListener('message', e => {
+    if (e.data && e.data.type === 'open' && typeof e.data.hash === 'string') location.hash = e.data.hash;
+  });
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('sw.js').then(reg => {
       reg.addEventListener('updatefound', () => {
@@ -300,4 +323,4 @@ function registerServiceWorker() {
 }
 
 // Untuk pengujian otomatis.
-window.__zn = { data, go };
+window.__zn = { data, go, reminders };

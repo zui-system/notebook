@@ -3,7 +3,10 @@
 // lalu dikirim ke server otomatis saat internet tersedia.
 import { loadStorage } from '../firebase.js';
 
-const PROFILE_KEYS = ['displayName', 'email', 'plan', 'settings', 'flags', 'createdAt', 'updatedAt'];
+const PROFILE_KEYS = ['displayName', 'email', 'plan', 'settings', 'flags', 'usage', 'createdAt', 'updatedAt'];
+// Field yang menentukan sebuah jadwal pengingat. "at" sengaja tidak termasuk: setelah dibuat,
+// server yang memajukan "at" untuk jadwal berulang.
+const REMINDER_KEYS = ['noteId', 'itemId', 'title', 'text', 'base', 'repeat', 'tz'];
 
 export class CloudStore {
   constructor(fb, user) {
@@ -14,6 +17,9 @@ export class CloudStore {
     this.uid = user.uid;
     this.notes = new Map();
     this.notebooks = new Map();
+    this.reminders = new Map();
+    this.remindersReady = false;
+    this.pendingReminders = null;
     this.listeners = new Set();
     this.unsubs = [];
     this.profile = { plan: 'free', flags: {} };
@@ -42,6 +48,18 @@ export class CloudStore {
       }, err => { this.onError(err); if (!done) { done = true; resolve(); } }));
     });
     await Promise.all([first('notes', this.notes), first('notebooks', this.notebooks)]);
+
+    // Jadwal pengingat: hanya dibaca untuk membandingkan, tidak memicu tampilan ulang.
+    this.unsubs.push(F.onSnapshot(this.col('reminders'), snap => {
+      for (const ch of snap.docChanges()) {
+        if (ch.type === 'removed') this.reminders.delete(ch.doc.id);
+        else this.reminders.set(ch.doc.id, ch.doc.data());
+      }
+      if (!this.remindersReady) {
+        this.remindersReady = true;
+        if (this.pendingReminders) { const want = this.pendingReminders; this.pendingReminders = null; this.syncReminders(want); }
+      }
+    }, err => this.onError(err)));
   }
 
   async ensureProfile() {
@@ -96,6 +114,31 @@ export class CloudStore {
 
   profileRef() { return this.fb.F.doc(this.fb.db, 'users', this.uid); }
 
+  // ---- Pengingat: samakan koleksi reminders dengan jadwal yang dihitung dari catatan ----
+  syncReminders(want) {
+    if (!this.remindersReady) { this.pendingReminders = want; return; }
+    const F = this.fb.F;
+    for (const [rid, r] of want) {
+      const cur = this.reminders.get(rid);
+      if (cur && REMINDER_KEYS.every(k => (cur[k] ?? null) === (r[k] ?? null))) continue;
+      this.reminders.set(rid, r);
+      this.write(F.setDoc(this.ref('reminders', rid), { ...r, updatedAt: F.serverTimestamp() }));
+    }
+    for (const rid of [...this.reminders.keys()]) {
+      if (want.has(rid)) continue;
+      this.reminders.delete(rid);
+      this.write(F.deleteDoc(this.ref('reminders', rid)));
+    }
+  }
+
+  saveDevice(id, token, label) {
+    const F = this.fb.F;
+    return this.write(F.setDoc(this.ref('devices', id), { token, label: String(label).slice(0, 80), createdAt: Date.now(), updatedAt: F.serverTimestamp() }));
+  }
+  removeDevice(id) {
+    return this.fb.F.deleteDoc(this.ref('devices', id));
+  }
+
   async getFlag(key) { return !!(this.profile.flags && this.profile.flags[key]); }
   setFlag(key, value) {
     this.profile.flags = { ...(this.profile.flags || {}), [key]: !!value };
@@ -106,16 +149,49 @@ export class CloudStore {
     return this.write(this.fb.F.updateDoc(this.profileRef(), { settings: this.profile.settings, updatedAt: this.fb.F.serverTimestamp() }));
   }
 
-  // ---- Gambar lampiran ----
-  async uploadImage(noteId, blob) {
-    const fb = await loadStorage();
-    const name = Date.now().toString(36) + Math.random().toString(36).slice(2, 8) + '.jpg';
-    const path = `users/${this.uid}/attachments/${noteId}/${name}`;
-    const r = fb.S.ref(fb.storage, path);
-    await fb.S.uploadBytes(r, blob, { contentType: 'image/jpeg' });
-    const url = await fb.S.getDownloadURL(r);
-    return { path, url, size: blob.size };
+  // ---- Foto lampiran ----
+  attachmentPath(noteId, id) { return `users/${this.uid}/attachments/${noteId}/${id}.jpg`; }
+
+  // Mencatat foto di kuota (satu batch: data lampiran + kenaikan pemakaian). Server menolak
+  // bila melewati batas paket; error itu diberi kode 'quota'.
+  async registerAttachment(e) {
+    const F = this.fb.F;
+    const b = F.writeBatch(this.fb.db);
+    b.set(this.ref('attachments', e.id), { noteId: e.noteId, path: e.path, size: e.size, contentType: 'image/jpeg', createdAt: e.createdAt });
+    b.update(this.profileRef(), { 'usage.bytes': F.increment(e.size), 'usage.files': F.increment(1), 'usage.lastAttId': e.id, updatedAt: F.serverTimestamp() });
+    try {
+      await withTimeout(b.commit(), 30000);
+    } catch (err) {
+      if (err && err.code === 'permission-denied') {
+        // Bisa jadi sudah tercatat oleh percobaan sebelumnya yang terputus.
+        const snap = await F.getDocFromServer(this.ref('attachments', e.id)).catch(() => null);
+        if (snap && snap.exists()) return;
+        const q = new Error('Kuota foto penuh');
+        q.code = 'quota';
+        throw q;
+      }
+      throw err;
+    }
   }
+
+  async uploadAttachment(e) {
+    const fb = await loadStorage();
+    const r = fb.S.ref(fb.storage, e.path);
+    await withTimeout(fb.S.uploadBytes(r, e.blob, { contentType: 'image/jpeg' }), 120000);
+    return fb.S.getDownloadURL(r);
+  }
+
+  // Menghapus foto: data lampiran + pengurangan kuota dalam satu batch, lalu filenya.
+  async deleteAttachment(a) {
+    const F = this.fb.F;
+    const b = F.writeBatch(this.fb.db);
+    b.delete(this.ref('attachments', a.id));
+    b.update(this.profileRef(), { 'usage.bytes': F.increment(-a.size), 'usage.files': F.increment(-1), 'usage.lastAttId': a.id, updatedAt: F.serverTimestamp() });
+    // Ditolak bila foto belum pernah tercatat (mis. masih menunggu di perangkat lain): abaikan.
+    b.commit().catch(err => { if (!err || err.code !== 'permission-denied') this.onError(err); });
+    if (navigator.onLine) await this.deleteFile(a.path);
+  }
+
   async deleteFile(path) {
     try {
       const fb = await loadStorage();
@@ -154,6 +230,10 @@ export class CloudStore {
   }
 
   close() { this.unsubs.forEach(u => { try { u(); } catch {} }); this.unsubs = []; }
+}
+
+function withTimeout(promise, ms) {
+  return Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('Waktu habis')), ms))]);
 }
 
 export { PROFILE_KEYS };

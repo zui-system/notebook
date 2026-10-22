@@ -3,12 +3,15 @@ import { h, icon, clear, toast, fmtDateTime, fmtSize } from '../dom.js';
 import { settings, updateSettings, FONT_SIZES, THEMES } from '../settings.js';
 import * as data from '../data.js';
 import { confirmDialog } from './dialogs.js';
-import { APP_VERSION } from '../config.js';
+import { APP_VERSION, PLANS } from '../config.js';
 import { accountHelp } from './auth.js';
+import * as reminders from '../reminders.js';
+import { exportAll } from './share.js';
 
 export function settingsView({ onSignOut, onSignIn }) {
   const el = h('section', { class: 'settings', 'aria-labelledby': 'set-title' });
   const backupList = h('div');
+  const quotaBox = h('div', { class: 'stack-sm' });
 
   function radioGroup({ name, legend, options, value, onPick, four }) {
     return h('fieldset', { class: 'seg' + (four ? ' four' : '') },
@@ -53,6 +56,14 @@ export function settingsView({ onSignOut, onSignIn }) {
       toggle({ id: 'lbl', label: 'Tampilkan label tombol', help: 'Menampilkan tulisan di bawah setiap ikon.', checked: s.labels, onChange: v => { updateSettings({ labels: v }); } })
     ));
 
+    // --- Pengingat ---
+    el.appendChild(h('section', { 'aria-labelledby': 'set-rem' },
+      h('h2', { id: 'set-rem' }, 'Pengingat'),
+      toggle({ id: 'rem', label: 'Pengingat aktif', help: 'Matikan untuk menghentikan semua notifikasi pengingat. Tanggal pada item tetap tersimpan.', checked: s.reminders,
+        onChange: v => { updateSettings({ reminders: v }); toast(v ? 'Pengingat dinyalakan.' : 'Semua pengingat dimatikan.'); render(); focusOn('#rem'); } }),
+      s.reminders ? notifyStatus(store) : null
+    ));
+
     // --- Cadangan ---
     const cloud = store.kind === 'cloud';
     el.appendChild(h('section', { 'aria-labelledby': 'set-backup' },
@@ -76,6 +87,22 @@ export function settingsView({ onSignOut, onSignIn }) {
     ));
     loadBackups();
 
+    // --- Penyimpanan foto (akun saja) ---
+    if (cloud) {
+      el.appendChild(h('section', { 'aria-labelledby': 'set-photo' },
+        h('h2', { id: 'set-photo' }, 'Penyimpanan foto'),
+        quotaBox));
+      renderQuota();
+    }
+
+    // --- Ekspor ---
+    el.appendChild(h('section', { 'aria-labelledby': 'set-export' },
+      h('h2', { id: 'set-export' }, 'Ekspor'),
+      h('p', { class: 'desc' }, 'Simpan semua catatanmu dalam satu file .zip (Markdown), bisa dibuka di aplikasi lain. Selalu gratis.'),
+      h('div', { class: 'btnrow' }, h('button', { type: 'button', class: 'btn', onClick: exportAll }, icon('download'), 'Ekspor semua catatan')),
+      h('p', { class: 'desc' }, 'Untuk satu catatan atau satu notebook: buka menu ⋯ di catatan, atau "Atur" di notebook.')
+    ));
+
     // --- Akun ---
     const user = store.user;
     const plan = (store.profile && store.profile.plan) === 'plus' ? 'Plus' : 'Gratis';
@@ -96,6 +123,54 @@ export function settingsView({ onSignOut, onSignIn }) {
     ));
 
     el.appendChild(h('p', { class: 'note-small', style: 'text-align:center' }, `Zui Notebook versi ${APP_VERSION}`));
+  }
+
+  // Keadaan izin notifikasi di perangkat ini, dengan langkah yang jelas bila belum bisa.
+  function notifyStatus(store) {
+    const p = reminders.permission();
+    const box = h('div', { class: 'stack-sm' });
+    const cloudPush = store.kind === 'cloud' && reminders.pushConfigured();
+    if (p === 'unsupported') {
+      box.appendChild(h('p', { class: 'desc' }, reminders.isIOS() && !reminders.isStandalone()
+        ? 'Di iPhone dan iPad, notifikasi hanya bisa muncul bila Zui Notebook dipasang di Layar Utama: ketuk tombol Bagikan di Safari, pilih "Tambah ke Layar Utama", lalu buka Zui Notebook dari ikon itu.'
+        : 'Perangkat atau browser ini belum bisa menampilkan notifikasi. Tugas bertanggal tetap terlihat di "Hari ini".'));
+    } else if (p === 'denied') {
+      box.appendChild(h('p', { class: 'desc' }, 'Notifikasi diblokir untuk Zui Notebook di perangkat ini. Buka pengaturan browser atau HP, cari Zui Notebook, lalu izinkan notifikasi.'));
+    } else if (p === 'default') {
+      box.appendChild(h('p', { class: 'desc' }, 'Izinkan notifikasi agar pengingat bisa muncul di perangkat ini.'));
+      box.appendChild(h('div', { class: 'btnrow' }, h('button', { type: 'button', class: 'btn primary', onClick: async () => {
+        const r = await reminders.askPermission();
+        if (r === 'granted') { await reminders.enablePush(store); toast('Notifikasi diizinkan.'); }
+        render(); focusOn('#rem');
+      } }, icon('bell'), 'Izinkan notifikasi')));
+    } else {
+      box.appendChild(h('p', { class: 'desc' }, cloudPush
+        ? 'Notifikasi diizinkan. Pengingat tetap datang walau Zui Notebook sedang ditutup.'
+        : store.kind === 'cloud'
+          ? 'Notifikasi diizinkan. Pengingat muncul selama Zui Notebook terbuka (juga di latar belakang).'
+          : 'Notifikasi diizinkan. Tanpa akun, pengingat hanya muncul selama Zui Notebook terbuka. Masuk dengan akun agar pengingat tetap datang saat aplikasi ditutup.'));
+      box.appendChild(h('div', { class: 'btnrow' }, h('button', { type: 'button', class: 'btn', onClick: async () => {
+        const ok = await reminders.showReminder({ noteId: '', itemId: 'uji', title: 'Zui Notebook', text: 'Contoh pengingat', tz: new Date().getTimezoneOffset() }, Date.now(), { test: true });
+        toast(ok ? 'Notifikasi contoh dikirim.' : 'Notifikasi contoh gagal ditampilkan.');
+      } }, icon('bell'), 'Coba notifikasi')));
+    }
+    return box;
+  }
+
+  async function renderQuota() {
+    const store = data.getStore();
+    if (!store || store.kind !== 'cloud') return;
+    const u = await data.photoUsage();
+    const p = data.plan();
+    const pct = Math.min(100, Math.round((u.bytes / u.quota) * 100));
+    clear(quotaBox);
+    quotaBox.appendChild(h('p', { class: 'quota-num' }, h('strong', null, fmtSize(Math.max(0, u.quota - u.bytes))), ' tersisa'));
+    quotaBox.appendChild(h('div', { class: 'bar' + (pct >= 90 ? ' full' : ''), role: 'img', 'aria-label': `${pct} persen terpakai` }, h('span', { style: `width:${pct}%` })));
+    quotaBox.appendChild(h('p', { class: 'desc' }, `${fmtSize(u.bytes)} dari ${fmtSize(u.quota)} terpakai · ${u.files} foto`));
+    if (u.waiting) quotaBox.appendChild(h('p', { class: 'desc' }, `${u.waiting} foto menunggu internet untuk diunggah.`));
+    quotaBox.appendChild(h('p', { class: 'desc' }, p.id === 'plus'
+      ? `Paket Plus: foto hingga ${fmtSize(p.photoMax)} per foto, kualitas lebih tajam.`
+      : `Paket Gratis: foto hingga ${fmtSize(p.photoMax)} per foto (setelah dikecilkan otomatis). Paket Plus memberi ruang ${fmtSize(PLANS.plus.quota)}.`));
   }
 
   function focusOn(sel) { const n = el.querySelector(sel); if (n) n.focus(); }
@@ -159,5 +234,6 @@ export function settingsView({ onSignOut, onSignIn }) {
   }
 
   render();
-  return { el, update: () => {} };
+  // Kuota diperbarui saat profil berubah (mis. foto selesai diunggah).
+  return { el, update: () => { renderQuota(); } };
 }

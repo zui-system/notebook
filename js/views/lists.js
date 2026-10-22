@@ -3,6 +3,7 @@ import { h, icon, clear, fmtDate, toast } from '../dom.js';
 import * as data from '../data.js';
 import { go } from '../nav.js';
 import { confirmDialog, promptDialog, menuSheet } from './dialogs.js';
+import { exportSheet } from './share.js';
 
 export function greeting(d = new Date()) {
   const hr = d.getHours();
@@ -14,12 +15,21 @@ export function greeting(d = new Date()) {
 
 export function homeView({ name }) {
   const first = (name || '').trim().split(/\s+/)[0];
+  // Satu tautan kecil hanya bila ada tugas hari ini; selain itu beranda tetap kosong.
+  const today = h('div');
   const el = h('section', { class: 'home', 'aria-labelledby': 'home-title' },
     icon('notes', 'mark'),
     h('h1', { id: 'home-title' }, first ? `${greeting()}, ${first}` : greeting()),
-    h('p', null, 'Apa yang ingin kamu catat?')
+    h('p', null, 'Apa yang ingin kamu catat?'),
+    today
   );
-  return { el };
+  const update = () => {
+    clear(today);
+    const n = data.countToday();
+    if (n) today.appendChild(h('button', { type: 'button', class: 'btn small ghost', id: 'home-today', onClick: () => go('hari-ini') }, icon('sun'), `${n} tugas untuk hari ini`));
+  };
+  update();
+  return { el, update };
 }
 
 function card(n) {
@@ -104,6 +114,11 @@ async function notebookMenu(id) {
       { label: 'Ganti nama', icon: icon('pen'), run: async () => {
         const name = await promptDialog({ title: 'Ganti nama notebook', label: 'Nama notebook', value: nb.name });
         if (name) data.renameNotebook(id, name);
+      } },
+      { label: 'Ekspor notebook', icon: icon('share'), run: () => {
+        const notes = data.listNotes('notebook', id);
+        if (!notes.length) { toast('Notebook ini masih kosong.'); return; }
+        exportSheet(notes, nb.name);
       } },
       { label: 'Hapus notebook', icon: icon('trash'), danger: true, run: async () => {
         const n = data.countIn('notebook', id);

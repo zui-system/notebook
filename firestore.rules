@@ -7,6 +7,9 @@ rules_version = '2';
 //   users/{uid}/notes/{noteId}   catatan
 //   users/{uid}/notebooks/{id}   notebook
 //   users/{uid}/backups/{id}     daftar cadangan (isi file ada di Storage)
+//   users/{uid}/reminders/{id}   jadwal pengingat (dibaca server untuk mengirim notifikasi)
+//   users/{uid}/devices/{id}     alamat notifikasi tiap perangkat
+//   users/{uid}/attachments/{id} data foto lampiran (file ada di Storage); dihitung ke kuota
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -21,20 +24,34 @@ service cloud.firestore {
     // ---------- Profil ----------
     function validSettings(s) {
       return s is map
-        && s.keys().hasOnly(['fontSize', 'theme', 'highContrast', 'labels'])
+        && s.keys().hasOnly(['fontSize', 'theme', 'highContrast', 'labels', 'reminders'])
         && (!('fontSize' in s) || s.fontSize in ['kecil', 'sedang', 'besar', 'sangat-besar'])
         && (!('theme' in s) || s.theme in ['terang', 'gelap', 'ceria'])
         && (!('highContrast' in s) || s.highContrast is bool)
-        && (!('labels' in s) || s.labels is bool);
+        && (!('labels' in s) || s.labels is bool)
+        && (!('reminders' in s) || s.reminders is bool);
     }
 
+    // Pemakaian kuota foto. Hanya berubah bersama pembuatan/penghapusan lampiran (lihat bawah).
+    function validUsage(u) {
+      return u is map && u.keys().hasOnly(['bytes', 'files', 'lastAttId'])
+        && u.get('bytes', 0) is int && u.get('bytes', 0) >= 0
+        && u.get('files', 0) is int && u.get('files', 0) >= 0
+        && (!('lastAttId' in u) || isStr(u.lastAttId, 40));
+    }
+
+    // Batas paket; harus sama dengan PLANS di js/config.js dan storage.rules.
+    function photoMax(plan) { return plan == 'plus' ? 20 * 1024 * 1024 : 5 * 1024 * 1024; }
+    function photoQuota(plan) { return plan == 'plus' ? 5 * 1024 * 1024 * 1024 : 100 * 1024 * 1024; }
+
     function validProfile(d) {
-      return d.keys().hasOnly(['displayName', 'email', 'plan', 'settings', 'flags', 'createdAt', 'updatedAt'])
+      return d.keys().hasOnly(['displayName', 'email', 'plan', 'settings', 'flags', 'usage', 'createdAt', 'updatedAt'])
         && d.keys().hasAll(['plan', 'createdAt'])
         && (!('displayName' in d) || isStr(d.displayName, 100))
         && (!('email' in d) || isStr(d.email, 200))
         && (!('settings' in d) || validSettings(d.settings))
         && (!('flags' in d) || (d.flags is map && d.flags.size() <= 20))
+        && (!('usage' in d) || validUsage(d.usage))
         && d.createdAt is number
         && (!('updatedAt' in d) || d.updatedAt == request.time);
     }
@@ -44,19 +61,40 @@ service cloud.firestore {
       // Profil baru selalu dimulai dengan paket "free".
       allow create: if isOwner(uid)
         && validProfile(request.resource.data)
-        && request.resource.data.plan == 'free';
+        && request.resource.data.plan == 'free'
+        && request.resource.data.get('usage', {}).get('bytes', 0) == 0
+        && request.resource.data.get('usage', {}).get('files', 0) == 0;
       // Pengguna boleh mengubah profil, tetapi TIDAK boleh mengubah plan dan createdAt.
       // (Plan nanti diubah oleh server/Cloud Functions saat ada pembayaran.)
+      // Pemakaian kuota hanya boleh berubah bila di batch yang sama ada lampiran (usage.lastAttId)
+      // yang benar-benar dibuat atau dihapus; besarnya perubahan diperiksa di aturan lampiran.
       allow update: if isOwner(uid)
         && validProfile(request.resource.data)
         && request.resource.data.plan == resource.data.plan
-        && request.resource.data.createdAt == resource.data.createdAt;
+        && request.resource.data.createdAt == resource.data.createdAt
+        && (request.resource.data.get('usage', null) == resource.data.get('usage', null)
+            || attChanged(request.resource.data.usage.get('lastAttId', '')));
       allow delete: if false;
 
+      function attPath(attId) { return /databases/$(database)/documents/users/$(uid)/attachments/$(attId); }
+      function attChanged(attId) {
+        return attId != '' && (existsAfter(attPath(attId)) != exists(attPath(attId)));
+      }
+      function profilePath() { return /databases/$(database)/documents/users/$(uid); }
+      function usageBefore() { return get(profilePath()).data.get('usage', {}); }
+      function usageAfter() { return getAfter(profilePath()).data.get('usage', {}); }
+
       // ---------- Catatan ----------
+      function isRepeat(v) { return v == null || v in ['harian', 'mingguan', 'bulanan']; }
+
+      // Item checklist; tanggal, ulangan, dan pengingat bersifat opsional.
       function validItem(i) {
-        return i is map && i.keys().hasOnly(['id', 'text', 'done'])
-          && isStr(i.id, 40) && isStr(i.text, 1000) && i.done is bool;
+        return i is map && i.keys().hasOnly(['id', 'text', 'done', 'due', 'hasTime', 'repeat', 'remind'])
+          && isStr(i.id, 40) && isStr(i.text, 1000) && i.done is bool
+          && (i.get('due', null) == null || i.due is number)
+          && (!('hasTime' in i) || i.hasTime is bool)
+          && isRepeat(i.get('repeat', null))
+          && (!('remind' in i) || i.remind is bool);
       }
 
       function validNote(d) {
@@ -96,6 +134,68 @@ service cloud.firestore {
           && request.resource.data.name is string
           && request.resource.data.name.size() > 0
           && request.resource.data.name.size() <= 60
+          && request.resource.data.createdAt is number
+          && (!('updatedAt' in request.resource.data) || request.resource.data.updatedAt == request.time);
+      }
+
+      // ---------- Lampiran foto (kuota ditegakkan di sini) ----------
+      // Membuat: satu batch bersama kenaikan usage.bytes sebesar size, usage.files + 1,
+      // dan usage.lastAttId = attId. Menghapus: kebalikannya. Data lampiran tidak bisa diubah.
+      match /attachments/{attId} {
+        allow read: if isOwner(uid);
+        allow create: if isOwner(uid)
+          && attId.matches('[A-Za-z0-9]{8,40}')
+          && request.resource.data.keys().hasOnly(['noteId', 'path', 'size', 'contentType', 'createdAt'])
+          && request.resource.data.noteId is string
+          && request.resource.data.noteId.matches('[A-Za-z0-9_-]{1,40}')
+          && request.resource.data.path == 'users/' + uid + '/attachments/' + request.resource.data.noteId + '/' + attId + '.jpg'
+          && request.resource.data.size is int
+          && request.resource.data.size > 0
+          && request.resource.data.size <= photoMax(get(profilePath()).data.plan)
+          && request.resource.data.contentType == 'image/jpeg'
+          && request.resource.data.createdAt is number
+          && usageAfter().get('bytes', 0) == usageBefore().get('bytes', 0) + request.resource.data.size
+          && usageAfter().get('files', 0) == usageBefore().get('files', 0) + 1
+          && usageAfter().get('bytes', 0) <= photoQuota(get(profilePath()).data.plan)
+          && usageAfter().get('lastAttId', '') == attId;
+        allow delete: if isOwner(uid)
+          && usageAfter().get('bytes', 0) == usageBefore().get('bytes', 0) - resource.data.size
+          && usageAfter().get('files', 0) == usageBefore().get('files', 0) - 1
+          && usageAfter().get('lastAttId', '') == attId;
+        allow update: if false;
+      }
+
+      // ---------- Jadwal pengingat ----------
+      // Ditulis aplikasi dari item bertanggal; server (Admin SDK) yang mengirim notifikasi
+      // lalu memajukan atau menghapus jadwal.
+      match /reminders/{rid} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if isOwner(uid)
+          && rid.size() <= 40
+          && request.resource.data.keys().hasOnly(['noteId', 'itemId', 'title', 'text', 'at', 'base', 'repeat', 'tz', 'updatedAt'])
+          && request.resource.data.keys().hasAll(['noteId', 'itemId', 'text', 'at', 'base', 'tz'])
+          && isStr(request.resource.data.noteId, 40)
+          && isStr(request.resource.data.itemId, 40)
+          && (!('title' in request.resource.data) || isStr(request.resource.data.title, 120))
+          && isStr(request.resource.data.text, 200)
+          && request.resource.data.at is number
+          && request.resource.data.base is number
+          && isRepeat(request.resource.data.get('repeat', null))
+          && request.resource.data.tz is int
+          && request.resource.data.tz >= -840 && request.resource.data.tz <= 840
+          && (!('updatedAt' in request.resource.data) || request.resource.data.updatedAt == request.time);
+      }
+
+      // ---------- Perangkat penerima notifikasi ----------
+      match /devices/{deviceId} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if isOwner(uid)
+          && deviceId.size() <= 40
+          && request.resource.data.keys().hasOnly(['token', 'label', 'createdAt', 'updatedAt'])
+          && request.resource.data.token is string
+          && request.resource.data.token.size() > 0
+          && request.resource.data.token.size() <= 4096
+          && isStr(request.resource.data.label, 80)
           && request.resource.data.createdAt is number
           && (!('updatedAt' in request.resource.data) || request.resource.data.updatedAt == request.time);
       }

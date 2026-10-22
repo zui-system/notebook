@@ -2,7 +2,7 @@ rules_version = '2';
 
 // Zui Notebook — aturan keamanan Firebase Storage
 // Setiap file hanya bisa dibaca, diunggah, dan dihapus oleh pemiliknya.
-// Ukuran dan jenis file dibatasi.
+// Ukuran dan jenis file dibatasi; foto lampiran juga dibatasi kuota paket.
 
 service firebase.storage {
   match /b/{bucket}/o {
@@ -11,13 +11,25 @@ service firebase.storage {
       return request.auth != null && request.auth.uid == uid;
     }
 
-    // Gambar lampiran catatan: maks 5 MB, hanya gambar.
+    // Foto lampiran: hanya boleh diunggah bila sudah tercatat di Firestore
+    // (users/{uid}/attachments/{attId}) dengan ukuran yang sama persis. Pencatatan itu
+    // yang menegakkan batas per foto dan kuota total paket (lihat firestore.rules).
+    function registered(uid, noteId, attId) {
+      let att = /databases/(default)/documents/users/$(uid)/attachments/$(attId);
+      return firestore.exists(att)
+        && firestore.get(att).data.size == request.resource.size
+        && firestore.get(att).data.noteId == noteId;
+    }
+
     match /users/{uid}/attachments/{noteId}/{fileName} {
       allow read: if isOwner(uid);
       allow create: if isOwner(uid)
-        && request.resource.size <= 5 * 1024 * 1024
-        && request.resource.contentType.matches('image/(jpeg|png|webp|gif)');
+        && fileName.matches('[A-Za-z0-9]{8,40}[.]jpg')
+        && request.resource.size <= 20 * 1024 * 1024
+        && request.resource.contentType == 'image/jpeg'
+        && registered(uid, noteId, fileName.split('[.]')[0]);
       allow update: if false;
+      // Gambar lama (Tahap 1) tidak tercatat di Firestore dan tetap bisa dihapus pemiliknya.
       allow delete: if isOwner(uid);
     }
 

@@ -40,7 +40,8 @@ with sync_playwright() as p:
     ctx.route("https://fonts.gstatic.com/**", lambda r: r.abort())
     page = ctx.new_page()
     page.on("pageerror", lambda e: errors.append(str(e)))
-    page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "Failed to load resource" not in m.text else None)
+    # CDN Firebase juga tidak terjangkau dari lingkungan uji; mode tanpa akun tidak memakainya.
+    page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "Failed to load resource" not in m.text and "www.gstatic.com/firebasejs" not in m.text else None)
     # Kegagalan muat file selain huruf Google (yang sengaja diblokir) dicatat sebagai error.
     page.on("response", lambda r: errors.append(f"{r.status} {r.url}") if r.status >= 400 and "fonts.g" not in r.url else None)
 

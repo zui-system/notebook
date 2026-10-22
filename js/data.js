@@ -2,8 +2,11 @@
 // Bekerja di atas LocalStore (perangkat) atau CloudStore (akun).
 import { LocalStore } from './store/local.js';
 import { SearchIndex, normalize } from './search.js';
-import { LIMITS } from './config.js';
+import { LIMITS, PLANS } from './config.js';
+import { putUpload, getUpload, deleteUpload, listUploads } from './store/outbox.js';
 import { settings, onSettings } from './settings.js';
+import { REPEATS, reminderBase, nextOccurrence, reminderId, advanceDue } from './recur.js';
+import { scheduleLocal } from './reminders.js';
 
 export const search = new SearchIndex();
 let store = null;
@@ -16,6 +19,7 @@ function emit(what) {
   if (!store) return;
   search.sync(store.notes, store.notebooks);
   listeners.forEach(fn => fn(what));
+  scheduleReminderSync();
 }
 
 export const newId = () => (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now()).replace(/-/g, '').slice(0, 20);
@@ -38,7 +42,7 @@ export function cleanNote(n) {
   o.title = String(o.title || '').slice(0, 300);
   o.body = String(o.body || '').slice(0, 50000);
   o.type = o.type === 'checklist' ? 'checklist' : 'text';
-  o.items = (Array.isArray(o.items) ? o.items : []).slice(0, 300).map(i => ({ id: String(i.id || newId()).slice(0, 40), text: String(i.text || '').slice(0, 1000), done: !!i.done }));
+  o.items = (Array.isArray(o.items) ? o.items : []).slice(0, 300).map(cleanItem);
   o.notebookId = typeof o.notebookId === 'string' && o.notebookId ? o.notebookId.slice(0, 40) : null;
   o.tags = [...new Set((Array.isArray(o.tags) ? o.tags : []).map(normTag).filter(Boolean))].slice(0, 20);
   o.pinned = !!o.pinned;
@@ -46,8 +50,25 @@ export function cleanNote(n) {
   o.deletedAt = typeof o.deletedAt === 'number' ? o.deletedAt : null;
   o.createdAt = typeof o.createdAt === 'number' ? o.createdAt : Date.now();
   o.editedAt = typeof o.editedAt === 'number' ? o.editedAt : Date.now();
-  o.attachments = (Array.isArray(o.attachments) ? o.attachments : []).slice(0, LIMITS.attachmentsPerNote)
-    .map(a => ({ path: String(a.path), url: String(a.url), size: Number(a.size) || 0 }));
+  o.attachments = (Array.isArray(o.attachments) ? o.attachments : []).slice(0, LIMITS.attachmentsPerNote).map(a => {
+    const x = { path: String(a.path), url: String(a.url || ''), size: Number(a.size) || 0 };
+    if (a.id) x.id = String(a.id).slice(0, 40);
+    if (a.pending) x.pending = true;
+    return x;
+  });
+  return o;
+}
+
+// Item checklist. Field tanggal hanya ditulis bila item punya tanggal,
+// jadi item tanpa tanggal tetap persis seperti Tahap 1.
+export function cleanItem(i) {
+  const o = { id: String(i.id || newId()).slice(0, 40), text: String(i.text || '').slice(0, 1000), done: !!i.done };
+  if (typeof i.due === 'number' && isFinite(i.due)) {
+    o.due = Math.round(i.due);
+    o.hasTime = !!i.hasTime;
+    o.repeat = REPEATS.includes(i.repeat) ? i.repeat : null;
+    o.remind = !!i.remind;
+  }
   return o;
 }
 
@@ -82,14 +103,20 @@ async function attach(s) {
   store = s;
   store.onChange(what => emit(what));
   if (unsubSettings) unsubSettings();
-  unsubSettings = onSettings((st, fromRemote) => { if (!fromRemote && store) store.saveSettings(st); });
+  unsubSettings = onSettings((st, fromRemote) => { if (!fromRemote && store) store.saveSettings(st); scheduleReminderSync(); });
   if (!(await store.getFlag('sample'))) {
     await createSample();
     await store.setFlag('sample', true);
   }
   emit();
   purgeTrash();
+  processOutbox();
 }
+
+// Pesan untuk pengguna dari proses di belakang layar (mis. unggahan foto gagal).
+let notice = () => {};
+export function onNotice(fn) { notice = fn; }
+window.addEventListener('online', () => processOutbox());
 
 export async function useLocal() {
   const s = new LocalStore();
@@ -187,7 +214,7 @@ export const restoreNote = id => updateNote(id, { deletedAt: null }, { touch: fa
 export async function deleteForever(id) {
   const n = getNote(id);
   if (!n) return;
-  for (const a of n.attachments || []) if (store.deleteFile) store.deleteFile(a.path);
+  for (const a of n.attachments || []) await discardAttachment(a);
   await store.removeNote(id);
 }
 
@@ -202,6 +229,89 @@ export async function purgeTrash() {
 
 export function daysLeftInTrash(n) {
   return Math.max(0, Math.ceil((n.deletedAt + LIMITS.trashDays * 86400000 - Date.now()) / 86400000));
+}
+
+// ---- Tanggal dan pengingat pada item checklist ----
+const DAY = 86400000;
+export function startOfDay(ms = Date.now()) { const d = new Date(ms); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); }
+export function addDays(dayStart, n) { const d = new Date(dayStart); return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n).getTime(); }
+
+// Mencentang item. Item berulang tidak menjadi selesai, tetapi maju ke jadwal berikutnya.
+// Mengembalikan tanggal baru bila item maju, selain itu null.
+export function applyDone(item, done, now = Date.now()) {
+  if (done && item.repeat && typeof item.due === 'number') {
+    item.due = advanceDue(item, now, new Date(item.due).getTimezoneOffset());
+    item.done = false;
+    return item.due;
+  }
+  item.done = !!done;
+  return null;
+}
+
+export function updateItem(noteId, itemId, fn) {
+  const n = getNote(noteId);
+  if (!n) return null;
+  const items = (n.items || []).map(i => ({ ...i }));
+  const it = items.find(i => i.id === itemId);
+  if (!it) return null;
+  const result = fn(it);
+  updateNote(noteId, { items });
+  return result;
+}
+
+export const setItemDone = (noteId, itemId, done) => updateItem(noteId, itemId, it => applyDone(it, done));
+export const setItemRemind = (noteId, itemId, remind) => updateItem(noteId, itemId, it => { it.remind = !!remind; return true; });
+
+// Item bertanggal yang belum selesai, dari catatan checklist yang aktif (bukan arsip/sampah).
+export function datedItems() {
+  const out = [];
+  for (const n of allNotes()) {
+    if (n.deletedAt || n.archived || n.type !== 'checklist') continue;
+    for (const it of n.items || []) if (typeof it.due === 'number' && !it.done && it.text.trim()) out.push({ note: n, item: it });
+  }
+  return out.sort((a, b) => a.item.due - b.item.due || (b.item.hasTime ? 0 : 1) - (a.item.hasTime ? 0 : 1));
+}
+
+export function agenda(now = Date.now()) {
+  const today = startOfDay(now), tomorrow = addDays(today, 1);
+  const res = { overdue: [], today: [], upcoming: [] };
+  for (const e of datedItems()) {
+    if (e.item.due < today) res.overdue.push(e);
+    else if (e.item.due < tomorrow) res.today.push(e);
+    else res.upcoming.push(e);
+  }
+  return res;
+}
+
+export function countToday() { const a = agenda(); return a.overdue.length + a.today.length; }
+export function hasDatedItems() { return allNotes().some(n => !n.deletedAt && n.type === 'checklist' && (n.items || []).some(i => typeof i.due === 'number')); }
+
+// Jadwal pengingat yang seharusnya ada, dihitung ulang dari catatan.
+export function desiredReminders(now = Date.now()) {
+  const out = new Map();
+  if (!store || !settings.reminders) return out;
+  for (const { note, item } of datedItems()) {
+    if (!item.remind) continue;
+    const base = reminderBase(item);
+    const tz = new Date(base).getTimezoneOffset();
+    const at = nextOccurrence(base, item.repeat, tz, now);
+    if (at === null) continue;
+    out.set(reminderId(note.id, item.id), {
+      noteId: note.id, itemId: item.id, title: noteTitle(note).slice(0, 120), text: item.text.trim().slice(0, 200),
+      at, base, repeat: item.repeat || null, tz
+    });
+  }
+  return out;
+}
+
+let remTimer = null;
+function scheduleReminderSync() { clearTimeout(remTimer); remTimer = setTimeout(syncReminders, 500); }
+export function syncReminders() {
+  clearTimeout(remTimer);
+  if (!store) return;
+  const want = desiredReminders();
+  scheduleLocal([...want.values()]);
+  if (store.syncReminders) store.syncReminders(want);
 }
 
 // ---- Notebook ----
@@ -220,39 +330,141 @@ export async function deleteNotebook(id) {
   await store.removeNotebook(id);
 }
 
-// ---- Gambar ----
-export async function resizeImage(file) {
-  if (file.size > LIMITS.imageInputMax) throw new Error('Gambar terlalu besar. Maksimal 15 MB.');
+// ---- Foto lampiran ----
+export function plan() {
+  const p = store && store.profile && store.profile.plan;
+  return { id: p === 'plus' ? 'plus' : 'free', ...PLANS[p === 'plus' ? 'plus' : 'free'] };
+}
+
+// Pemakaian kuota foto: yang sudah tercatat di akun + yang masih menunggu di perangkat.
+export async function photoUsage() {
+  const u = (store && store.profile && store.profile.usage) || {};
+  const queued = store && store.kind === 'cloud' ? await listUploads(store.uid).catch(() => []) : [];
+  const pending = queued.filter(e => !e.committed);
+  return {
+    bytes: (u.bytes || 0) + pending.reduce((n, e) => n + e.size, 0),
+    files: (u.files || 0) + pending.length,
+    waiting: queued.length,
+    quota: plan().quota
+  };
+}
+
+// Mengecilkan foto sebelum diunggah: sisi terpanjang dibatasi, lalu kualitas JPEG diturunkan
+// bertahap sampai ukurannya wajar (hemat kuota dan cepat diunggah).
+export async function resizeImage(file, p = plan()) {
   if (!/^image\//.test(file.type)) throw new Error('File ini bukan gambar.');
-  const bmp = await createImageBitmap(file).catch(() => { throw new Error('Gambar tidak bisa dibuka.'); });
-  const scale = Math.min(1, LIMITS.imageMaxSide / Math.max(bmp.width, bmp.height));
+  if (file.size > LIMITS.imageInputMax) throw new Error('Foto terlalu besar untuk dibuka. Maksimal 40 MB.');
+  const bmp = await createImageBitmap(file).catch(() => { throw new Error('Foto tidak bisa dibuka.'); });
+  const scale = Math.min(1, p.imageMaxSide / Math.max(bmp.width, bmp.height));
   const w = Math.round(bmp.width * scale), hgt = Math.round(bmp.height * scale);
   const canvas = document.createElement('canvas');
   canvas.width = w; canvas.height = hgt;
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, hgt);
   ctx.drawImage(bmp, 0, 0, w, hgt);
-  const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.85));
-  if (!blob || blob.size > LIMITS.imageUploadMax) throw new Error('Gambar masih terlalu besar setelah diperkecil (maks 5 MB).');
+  if (bmp.close) bmp.close();
+  const target = Math.min(p.photoMax, 1.5 * 1024 * 1024);
+  let blob = null;
+  for (const q of [0.82, 0.72, 0.6, 0.5]) {
+    blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', q));
+    if (blob && blob.size <= target) break;
+  }
+  if (!blob || blob.size > p.photoMax) throw new Error(`Foto masih terlalu besar setelah dikompres (maks ${Math.round(p.photoMax / 1024 / 1024)} MB per foto).`);
   return blob;
 }
 
+// Menambah foto ke catatan. Foto langsung tampil dan disimpan dulu di perangkat;
+// unggahan berjalan sendiri saat ada internet (juga bila foto diambil saat offline).
 export async function addImage(noteId, file) {
+  if (!store || store.kind !== 'cloud') throw new Error('Masuk dengan akun untuk menambah foto.');
   const n = getNote(noteId);
   if (!n) throw new Error('Catatan tidak ditemukan.');
-  if ((n.attachments || []).length >= LIMITS.attachmentsPerNote) throw new Error(`Maksimal ${LIMITS.attachmentsPerNote} gambar per catatan.`);
-  if (!navigator.onLine) throw new Error('Menambah gambar butuh internet. Coba lagi saat online.');
-  const blob = await resizeImage(file);
-  const att = await store.uploadImage(noteId, blob);
+  if ((n.attachments || []).length >= LIMITS.attachmentsPerNote) throw new Error(`Maksimal ${LIMITS.attachmentsPerNote} foto per catatan.`);
+  const p = plan();
+  const blob = await resizeImage(file, p);
+  const use = await photoUsage();
+  if (use.bytes + blob.size > p.quota) {
+    throw new Error(p.id === 'plus' ? 'Kuota foto sudah penuh. Hapus beberapa foto lama dulu.' : 'Kuota foto paket Gratis sudah penuh. Hapus beberapa foto lama, atau pakai paket Plus.');
+  }
+  const id = newId();
+  const entry = { id, uid: store.uid, noteId, path: store.attachmentPath(noteId, id), size: blob.size, blob, createdAt: Date.now(), committed: false };
+  await putUpload(entry);
   const cur = getNote(noteId);
-  updateNote(noteId, { attachments: [...(cur.attachments || []), att] });
+  updateNote(noteId, { attachments: [...(cur.attachments || []), { id, path: entry.path, url: '', size: blob.size, pending: true }] });
+  processOutbox();
+  return id;
+}
+
+// Foto yang belum terunggah dari perangkat ini (untuk ditampilkan sementara).
+export async function pendingBlob(id) {
+  const e = await getUpload(id).catch(() => null);
+  return e ? e.blob : null;
+}
+
+let outboxRunning = false;
+export async function processOutbox() {
+  if (outboxRunning || !store || store.kind !== 'cloud' || !navigator.onLine) return;
+  outboxRunning = true;
+  const s = store;
+  try {
+    for (const e of await listUploads(s.uid)) {
+      if (store !== s || !navigator.onLine) break;
+      const note = getNote(e.noteId);
+      const att = note && (note.attachments || []).find(a => a.id === e.id);
+      if (!att) {
+        // Foto sudah dihapus dari catatan sebelum sempat terunggah.
+        if (e.committed) await s.deleteAttachment({ id: e.id, path: e.path, size: e.size });
+        await deleteUpload(e.id);
+        continue;
+      }
+      try {
+        if (!e.committed) {
+          await s.registerAttachment(e);
+          e.committed = true;
+          await putUpload(e);
+        }
+        const url = await s.uploadAttachment(e);
+        const fresh = getNote(e.noteId);
+        if (fresh && (fresh.attachments || []).some(a => a.id === e.id)) {
+          updateNote(e.noteId, { attachments: fresh.attachments.map(a => a.id === e.id ? { id: a.id, path: a.path, url, size: a.size } : a) }, { touch: false });
+        } else {
+          // Dihapus selagi diunggah: kembalikan kuotanya.
+          await s.deleteAttachment({ id: e.id, path: e.path, size: e.size });
+        }
+        await deleteUpload(e.id);
+      } catch (err) {
+        if (err && err.code === 'quota') {
+          // Ditolak server (kuota penuh / batas paket): keluarkan dari catatan, beri tahu dengan jelas.
+          const fresh = getNote(e.noteId);
+          if (fresh) updateNote(e.noteId, { attachments: (fresh.attachments || []).filter(a => a.id !== e.id) }, { touch: false });
+          await deleteUpload(e.id);
+          notice('Satu foto tidak bisa disimpan karena kuota foto sudah penuh. Hapus beberapa foto lama dulu.');
+        } else {
+          console.warn('Unggahan foto ditunda', err);
+          break; // coba lagi nanti (saat online lagi atau aplikasi dibuka)
+        }
+      }
+    }
+  } finally {
+    outboxRunning = false;
+  }
+}
+
+// Menghapus data dan file sebuah lampiran (dipakai saat foto atau catatan dihapus).
+async function discardAttachment(a) {
+  const queued = a.id ? await getUpload(a.id).catch(() => null) : null;
+  if (queued && !queued.committed) { await deleteUpload(a.id); return; }
+  if (queued) await deleteUpload(a.id);
+  if (a.id && store.deleteAttachment) await store.deleteAttachment(a);
+  else if (store.deleteFile) store.deleteFile(a.path);
 }
 
 export async function removeImage(noteId, path) {
   const n = getNote(noteId);
   if (!n) return;
-  updateNote(noteId, { attachments: (n.attachments || []).filter(a => a.path !== path) });
-  if (store.deleteFile) store.deleteFile(path);
+  const a = (n.attachments || []).find(x => x.path === path);
+  updateNote(noteId, { attachments: (n.attachments || []).filter(x => x.path !== path) });
+  if (a) await discardAttachment(a);
 }
 
 // ---- Cadangan ----

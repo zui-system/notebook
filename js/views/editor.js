@@ -1,8 +1,11 @@
 // Penulis catatan: teks atau checklist. Tersimpan otomatis.
-import { h, icon, iconButton, clear, toast, fmtDateTime } from '../dom.js';
+import { h, icon, iconButton, clear, toast, fmtDateTime, fmtDue } from '../dom.js';
 import * as data from '../data.js';
 import { go, back } from '../nav.js';
-import { confirmDialog, promptDialog, menuSheet } from './dialogs.js';
+import { confirmDialog, promptDialog, menuSheet, openDialog } from './dialogs.js';
+import { dueDialog, applyDue, dueLine, prepareNotifications } from './due.js';
+import { TEMPLATES } from '../templates.js';
+import { exportSheet } from './share.js';
 
 function autoGrow(el) {
   el.style.height = 'auto';
@@ -31,10 +34,17 @@ export function editorView(id, { notebookId = null } = {}) {
       history.replaceState(null, '', '#/catatan/' + noteId);
       renderToolbar();
     } else {
-      data.saveNote(noteId, draft);
+      saveDraft();
     }
   }
+  // Foto dikelola terpisah (unggahan berjalan di belakang layar), jadi selalu pakai versi tersimpan.
+  function saveDraft() {
+    const cur = data.getNote(noteId);
+    if (cur) draft.attachments = structuredClone(cur.attachments || []);
+    data.saveNote(noteId, draft);
+  }
   function changed() {
+    if (templ.firstChild && !data.isEmptyNote(draft)) clear(templ);
     dirty = true;
     draft.editedAt = Date.now();
     clearTimeout(timer);
@@ -74,12 +84,40 @@ export function editorView(id, { notebookId = null } = {}) {
   });
   title.value = draft.title;
   const chips = h('div', { class: 'chips' });
+  const templ = h('div');
   const content = h('div');
   const attachments = h('div');
   const banner = h('div');
   const footer = h('p', { class: 'note-small', style: 'margin:18px 0 0' });
 
-  const el = h('article', { class: 'editor', 'aria-label': 'Catatan' }, banner, title, chips, content, attachments, footer);
+  const el = h('article', { class: 'editor', 'aria-label': 'Catatan' }, banner, title, chips, templ, content, attachments, footer);
+
+  // Pilihan template, hanya selama catatan baru masih kosong. Hilang sendiri begitu mulai menulis.
+  function renderTemplates() {
+    clear(templ);
+    if (noteId || !data.isEmptyNote(draft)) return;
+    templ.appendChild(h('section', { class: 'templates', 'aria-labelledby': 'tpl-t' },
+      h('h2', { id: 'tpl-t' }, 'Atau mulai dari template'),
+      h('div', { class: 'tplgrid' }, TEMPLATES.map(t =>
+        h('button', { type: 'button', class: 'tpl', onClick: () => useTemplate(t) }, icon(t.icon), h('span', null, t.label))))));
+  }
+
+  function useTemplate(t) {
+    Object.assign(draft, { body: '', items: [] }, t.build());
+    title.value = draft.title;
+    changed();
+    flush();
+    refreshAll();
+    const created = noteId;
+    toast(`Template "${t.label}" dipakai. Ubah isinya sesukamu.`, { label: 'Batalkan', run: async () => {
+      await data.deleteForever(created);
+      go('baru', draft.notebookId, { replace: true });
+    } });
+    // Kursor di akhir isi, siap mengubah.
+    const last = draft.type === 'checklist' ? content.querySelectorAll('input[type="text"]') : content.querySelectorAll('textarea');
+    const target = last[last.length - 1];
+    if (target) { target.focus(); target.setSelectionRange(target.value.length, target.value.length); }
+  }
 
   function renderBanner() {
     clear(banner);
@@ -112,9 +150,22 @@ export function editorView(id, { notebookId = null } = {}) {
       const list = h('ul', { class: 'checklist', 'aria-label': 'Daftar periksa' });
       draft.items.forEach((it, idx) => {
         const cb = h('input', { type: 'checkbox', id: 'cb-' + it.id, checked: it.done, disabled: ro,
-          onChange: e => { it.done = e.target.checked; row.classList.toggle('done', it.done); changed(); } });
+          onChange: e => {
+            const next = data.applyDone(it, e.target.checked);
+            changed();
+            if (next) {
+              // Item berulang: tidak dicoret, tanggalnya maju ke jadwal berikutnya.
+              renderContent();
+              const again = content.querySelector('#cb-' + CSS.escape(it.id));
+              if (again) again.focus();
+              toast(`Bagus! Berikutnya: ${fmtDue(next, it.hasTime)}.`);
+              return;
+            }
+            row.classList.toggle('done', it.done);
+          } });
         const txt = h('input', {
           type: 'text', value: it.text, 'aria-label': `Item ${idx + 1}`, readOnly: ro, maxlength: 1000, 'data-id': it.id,
+          'aria-describedby': typeof it.due === 'number' ? 'due-' + it.id : null,
           onInput: e => { it.text = e.target.value; changed(); },
           onKeydown: e => {
             if (e.key === 'Enter') { e.preventDefault(); addItem(idx + 1); }
@@ -128,7 +179,8 @@ export function editorView(id, { notebookId = null } = {}) {
         if (ro) txt.readOnly = true;
         const row = h('li', { class: 'checkrow' + (it.done ? ' done' : '') },
           h('label', { class: 'box', for: 'cb-' + it.id }, cb, h('span', { class: 'sr-only' }, `Selesai: item ${idx + 1}`)),
-          txt,
+          h('div', { class: 'itemmain' }, txt, dueLine(it, 'due-' + it.id)),
+          ro ? null : iconButton({ icon: 'calendar', cls: 'duebtn' + (typeof it.due === 'number' ? ' set' : ''), label: `${typeof it.due === 'number' ? 'Ubah' : 'Atur'} tanggal item ${idx + 1}`, onClick: () => editDue(it) }),
           ro ? null : iconButton({ icon: 'close', label: `Hapus item ${idx + 1}`, onClick: () => { draft.items.splice(idx, 1); changed(); renderContent(); } })
         );
         list.appendChild(row);
@@ -150,6 +202,20 @@ export function editorView(id, { notebookId = null } = {}) {
     }
   }
 
+  async function editDue(it) {
+    const res = await dueDialog(it);
+    if (!res) return;
+    applyDue(it, res);
+    changed();
+    flush();
+    renderContent();
+    const btn = [...content.querySelectorAll('.duebtn')][draft.items.indexOf(it)];
+    if (btn) btn.focus();
+    if (res.clear) { toast('Tanggal dihapus.'); return; }
+    toast(`${res.remind ? 'Pengingat dipasang' : 'Tanggal disimpan'}: ${fmtDue(it.due, it.hasTime)}.`);
+    if (res.remind) await prepareNotifications();
+  }
+
   function addItem(at) {
     const it = { id: data.newId(), text: '', done: false };
     draft.items.splice(at, 0, it);
@@ -163,17 +229,42 @@ export function editorView(id, { notebookId = null } = {}) {
     else if (draft.type === 'checklist') addItem(0);
   }
 
+  const blobUrls = new Map();
   function renderAttachments() {
     clear(attachments);
     const list = draft.attachments || [];
     if (!list.length) return;
-    attachments.appendChild(h('div', { class: 'attachments' }, list.map((a, i) => h('figure', null,
-      h('img', { src: a.url, alt: `Gambar ${i + 1}`, loading: 'lazy' }),
-      inTrash() ? null : h('figcaption', null, iconButton({ icon: 'trash', label: `Hapus gambar ${i + 1}`, onClick: async () => {
-        const ok = await confirmDialog({ title: 'Hapus gambar?', message: 'Gambar ini akan dihapus dari catatan.', ok: 'Hapus gambar', danger: true });
-        if (ok) { await data.removeImage(noteId, a.path); draft.attachments = data.getNote(noteId).attachments; renderAttachments(); }
-      } }))
-    ))));
+    attachments.appendChild(h('div', { class: 'attachments' }, list.map((a, i) => {
+      const img = h('img', { alt: `Foto ${i + 1}`, loading: 'lazy' });
+      const fig = h('figure', { class: a.pending ? 'pending' : null },
+        h('button', { type: 'button', class: 'thumb', 'aria-label': `Lihat foto ${i + 1}`, onClick: () => viewPhoto(img.src, i) }, img),
+        a.pending ? h('span', { class: 'wait' }, 'Menunggu internet…') : null,
+        inTrash() ? null : h('figcaption', null, iconButton({ icon: 'trash', label: `Hapus foto ${i + 1}`, onClick: async () => {
+          const ok = await confirmDialog({ title: 'Hapus foto?', message: 'Foto ini akan dihapus dari catatan.', ok: 'Hapus foto', danger: true });
+          if (ok) { await data.removeImage(noteId, a.path); draft.attachments = data.getNote(noteId).attachments; renderAttachments(); }
+        } }))
+      );
+      if (a.url) img.src = a.url;
+      else showPending(a, img, fig);
+      return fig;
+    })));
+  }
+
+  // Foto yang belum terunggah: tampilkan salinan dari perangkat ini bila ada.
+  async function showPending(a, img, fig) {
+    if (blobUrls.has(a.id)) { img.src = blobUrls.get(a.id); return; }
+    const blob = await data.pendingBlob(a.id);
+    if (blob) { const u = URL.createObjectURL(blob); blobUrls.set(a.id, u); img.src = u; }
+    else { fig.classList.add('elsewhere'); fig.querySelector('.wait').textContent = 'Sedang diunggah dari perangkat lain'; }
+  }
+
+  function viewPhoto(src, i) {
+    if (!src) return;
+    openDialog(({ close, titleId }) => h('div', { class: 'dlg viewer' },
+      h('h2', { id: titleId, class: 'sr-only' }, `Foto ${i + 1}`),
+      h('img', { src, alt: `Foto ${i + 1}` }),
+      h('div', { class: 'buttons' }, h('button', { type: 'button', class: 'btn block', autofocus: true, onClick: () => close() }, 'Tutup'))
+    ), { cls: 'photo' });
   }
 
   function renderFooter() {
@@ -181,7 +272,7 @@ export function editorView(id, { notebookId = null } = {}) {
   }
 
   function refreshAll() {
-    renderToolbar(); renderBanner(); renderChips(); renderContent(); renderAttachments(); renderFooter();
+    renderToolbar(); renderBanner(); renderChips(); renderTemplates(); renderContent(); renderAttachments(); renderFooter();
     requestAnimationFrame(() => autoGrow(title));
   }
 
@@ -239,24 +330,34 @@ export function editorView(id, { notebookId = null } = {}) {
   function pickImage() {
     const store = data.getStore();
     if (!store.canAttach) {
-      toast('Masuk dengan akun untuk menambah gambar.');
+      toast('Masuk dengan akun untuk menambah foto.');
       return;
     }
-    const input = h('input', { type: 'file', accept: 'image/*', style: 'display:none' });
+    menuSheet({
+      title: 'Tambah foto',
+      items: [
+        { label: 'Ambil foto dengan kamera', icon: icon('camera'), run: () => chooseFiles(true) },
+        { label: 'Pilih dari galeri', icon: icon('image'), run: () => chooseFiles(false) }
+      ]
+    });
+  }
+
+  function chooseFiles(camera) {
+    const input = h('input', { type: 'file', accept: 'image/*', capture: camera ? 'environment' : null, multiple: camera ? null : true, style: 'display:none' });
     input.addEventListener('change', async () => {
-      const file = input.files && input.files[0];
+      const files = [...(input.files || [])];
       input.remove();
-      if (!file) return;
-      try {
-        const id = await ensureSaved();
-        toast('Mengunggah gambar…');
-        await data.addImage(id, file);
-        draft.attachments = data.getNote(id).attachments;
-        renderAttachments();
-        toast('Gambar ditambahkan.');
-      } catch (e) {
-        toast(e.message || 'Gambar gagal ditambahkan.');
+      if (!files.length) return;
+      const id = await ensureSaved();
+      let added = 0;
+      toast(files.length > 1 ? `Menyiapkan ${files.length} foto…` : 'Menyiapkan foto…');
+      for (const file of files) {
+        try { await data.addImage(id, file); added++; }
+        catch (e) { toast(e.message || 'Foto gagal ditambahkan.'); break; }
       }
+      draft.attachments = data.getNote(id).attachments;
+      renderAttachments();
+      if (added) toast(navigator.onLine ? (added > 1 ? `${added} foto ditambahkan.` : 'Foto ditambahkan.') : 'Foto disimpan di perangkat dan akan diunggah saat online.');
     });
     document.body.appendChild(input);
     input.click();
@@ -268,7 +369,12 @@ export function editorView(id, { notebookId = null } = {}) {
       items: [
         { label: 'Pindah ke notebook', icon: icon('book'), run: chooseNotebook },
         { label: 'Atur tag', icon: icon('tag'), run: editTags },
-        { label: 'Tambah gambar', icon: icon('image'), run: pickImage },
+        { label: 'Tambah foto', icon: icon('camera'), run: pickImage },
+        { label: 'Ekspor catatan', icon: icon('share'), run: async () => {
+          if (data.isEmptyNote(draft)) { toast('Catatan masih kosong.'); return; }
+          const id = await ensureSaved();
+          exportSheet([data.getNote(id)], data.noteTitle(data.getNote(id)));
+        } },
         { label: draft.archived ? 'Keluarkan dari arsip' : 'Arsipkan', icon: icon('archive'), run: async () => {
           await ensureSaved();
           const archived = !draft.archived;
@@ -281,7 +387,7 @@ export function editorView(id, { notebookId = null } = {}) {
           if (!ok) return;
           clearTimeout(timer); dirty = false;
           if (noteId) {
-            data.saveNote(noteId, draft);
+            saveDraft();
             data.trashNote(noteId);
             const deletedId = noteId;
             toast('Catatan dipindah ke tempat sampah.', { label: 'Batalkan', run: () => data.restoreNote(deletedId) });
@@ -313,8 +419,14 @@ export function editorView(id, { notebookId = null } = {}) {
         else { title.value = draft.title; refreshAll(); }
       } else {
         renderChips();
+        // Foto selesai diunggah (atau dihapus dari perangkat lain).
+        if (JSON.stringify(fresh.attachments || []) !== JSON.stringify(draft.attachments || [])) {
+          draft.attachments = structuredClone(fresh.attachments || []);
+          renderAttachments();
+        }
       }
     },
+    // Juga dipanggil saat aplikasi disembunyikan (mis. membuka kamera), jadi foto sementara tetap disimpan.
     destroy: flush
   };
 }
