@@ -4,6 +4,7 @@ import * as data from '../data.js';
 import { go, back } from '../nav.js';
 import { confirmDialog, promptDialog, menuSheet, openDialog } from './dialogs.js';
 import { dueDialog, applyDue, dueLine, prepareNotifications } from './due.js';
+import { TEMPLATES } from '../templates.js';
 
 function autoGrow(el) {
   el.style.height = 'auto';
@@ -42,6 +43,7 @@ export function editorView(id, { notebookId = null } = {}) {
     data.saveNote(noteId, draft);
   }
   function changed() {
+    if (templ.firstChild && !data.isEmptyNote(draft)) clear(templ);
     dirty = true;
     draft.editedAt = Date.now();
     clearTimeout(timer);
@@ -81,12 +83,40 @@ export function editorView(id, { notebookId = null } = {}) {
   });
   title.value = draft.title;
   const chips = h('div', { class: 'chips' });
+  const templ = h('div');
   const content = h('div');
   const attachments = h('div');
   const banner = h('div');
   const footer = h('p', { class: 'note-small', style: 'margin:18px 0 0' });
 
-  const el = h('article', { class: 'editor', 'aria-label': 'Catatan' }, banner, title, chips, content, attachments, footer);
+  const el = h('article', { class: 'editor', 'aria-label': 'Catatan' }, banner, title, chips, templ, content, attachments, footer);
+
+  // Pilihan template, hanya selama catatan baru masih kosong. Hilang sendiri begitu mulai menulis.
+  function renderTemplates() {
+    clear(templ);
+    if (noteId || !data.isEmptyNote(draft)) return;
+    templ.appendChild(h('section', { class: 'templates', 'aria-labelledby': 'tpl-t' },
+      h('h2', { id: 'tpl-t' }, 'Atau mulai dari template'),
+      h('div', { class: 'tplgrid' }, TEMPLATES.map(t =>
+        h('button', { type: 'button', class: 'tpl', onClick: () => useTemplate(t) }, icon(t.icon), h('span', null, t.label))))));
+  }
+
+  function useTemplate(t) {
+    Object.assign(draft, { body: '', items: [] }, t.build());
+    title.value = draft.title;
+    changed();
+    flush();
+    refreshAll();
+    const created = noteId;
+    toast(`Template "${t.label}" dipakai. Ubah isinya sesukamu.`, { label: 'Batalkan', run: async () => {
+      await data.deleteForever(created);
+      go('baru', draft.notebookId, { replace: true });
+    } });
+    // Kursor di akhir isi, siap mengubah.
+    const last = draft.type === 'checklist' ? content.querySelectorAll('input[type="text"]') : content.querySelectorAll('textarea');
+    const target = last[last.length - 1];
+    if (target) { target.focus(); target.setSelectionRange(target.value.length, target.value.length); }
+  }
 
   function renderBanner() {
     clear(banner);
@@ -241,7 +271,7 @@ export function editorView(id, { notebookId = null } = {}) {
   }
 
   function refreshAll() {
-    renderToolbar(); renderBanner(); renderChips(); renderContent(); renderAttachments(); renderFooter();
+    renderToolbar(); renderBanner(); renderChips(); renderTemplates(); renderContent(); renderAttachments(); renderFooter();
     requestAnimationFrame(() => autoGrow(title));
   }
 

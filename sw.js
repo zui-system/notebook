@@ -15,6 +15,7 @@ const SHELL = [
   'js/search.js',
   'js/recur.js',
   'js/reminders.js',
+  'js/templates.js',
   'js/firebase.js',
   'js/store/local.js',
   'js/store/cloud.js',
