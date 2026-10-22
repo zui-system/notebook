@@ -7,18 +7,14 @@
 //  catatan hanya tersimpan di perangkat ini (berguna untuk uji coba).
 // ============================================================
 
-export const firebaseConfig = null;
-
-/* Contoh:
 export const firebaseConfig = {
-  apiKey: "AIza...",
-  authDomain: "zui-notebook.firebaseapp.com",
-  projectId: "zui-notebook",
-  storageBucket: "zui-notebook.firebasestorage.app",
-  messagingSenderId: "1234567890",
-  appId: "1:1234567890:web:abcdef"
+  apiKey: "AIzaSyCcsoG7EuloDwgvDAt_-Nfpx3jZk2dnDwA",
+  authDomain: "notebook-zui.firebaseapp.com",
+  projectId: "notebook-zui",
+  storageBucket: "notebook-zui.firebasestorage.app",
+  messagingSenderId: "461738650541",
+  appId: "1:461738650541:web:6f987c8582c779ef0b4f24"
 };
-*/
 
 // Alamat email bantuan yang ditampilkan di halaman "Tidak bisa masuk?"
 // Kosongkan ('') bila belum ada; barisnya tidak akan ditampilkan.
