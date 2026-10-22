@@ -5,6 +5,7 @@ import { go, back } from '../nav.js';
 import { confirmDialog, promptDialog, menuSheet, openDialog } from './dialogs.js';
 import { dueDialog, applyDue, dueLine, prepareNotifications } from './due.js';
 import { TEMPLATES } from '../templates.js';
+import { exportSheet } from './share.js';
 
 function autoGrow(el) {
   el.style.height = 'auto';
@@ -369,6 +370,11 @@ export function editorView(id, { notebookId = null } = {}) {
         { label: 'Pindah ke notebook', icon: icon('book'), run: chooseNotebook },
         { label: 'Atur tag', icon: icon('tag'), run: editTags },
         { label: 'Tambah foto', icon: icon('camera'), run: pickImage },
+        { label: 'Ekspor catatan', icon: icon('share'), run: async () => {
+          if (data.isEmptyNote(draft)) { toast('Catatan masih kosong.'); return; }
+          const id = await ensureSaved();
+          exportSheet([data.getNote(id)], data.noteTitle(data.getNote(id)));
+        } },
         { label: draft.archived ? 'Keluarkan dari arsip' : 'Arsipkan', icon: icon('archive'), run: async () => {
           await ensureSaved();
           const archived = !draft.archived;

@@ -6,6 +6,7 @@ import { confirmDialog } from './dialogs.js';
 import { APP_VERSION, PLANS } from '../config.js';
 import { accountHelp } from './auth.js';
 import * as reminders from '../reminders.js';
+import { exportAll } from './share.js';
 
 export function settingsView({ onSignOut, onSignIn }) {
   const el = h('section', { class: 'settings', 'aria-labelledby': 'set-title' });
@@ -93,6 +94,14 @@ export function settingsView({ onSignOut, onSignIn }) {
         quotaBox));
       renderQuota();
     }
+
+    // --- Ekspor ---
+    el.appendChild(h('section', { 'aria-labelledby': 'set-export' },
+      h('h2', { id: 'set-export' }, 'Ekspor'),
+      h('p', { class: 'desc' }, 'Simpan semua catatanmu dalam satu file .zip (Markdown), bisa dibuka di aplikasi lain. Selalu gratis.'),
+      h('div', { class: 'btnrow' }, h('button', { type: 'button', class: 'btn', onClick: exportAll }, icon('download'), 'Ekspor semua catatan')),
+      h('p', { class: 'desc' }, 'Untuk satu catatan atau satu notebook: buka menu ⋯ di catatan, atau "Atur" di notebook.')
+    ));
 
     // --- Akun ---
     const user = store.user;

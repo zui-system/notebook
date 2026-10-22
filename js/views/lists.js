@@ -3,6 +3,7 @@ import { h, icon, clear, fmtDate, toast } from '../dom.js';
 import * as data from '../data.js';
 import { go } from '../nav.js';
 import { confirmDialog, promptDialog, menuSheet } from './dialogs.js';
+import { exportSheet } from './share.js';
 
 export function greeting(d = new Date()) {
   const hr = d.getHours();
@@ -113,6 +114,11 @@ async function notebookMenu(id) {
       { label: 'Ganti nama', icon: icon('pen'), run: async () => {
         const name = await promptDialog({ title: 'Ganti nama notebook', label: 'Nama notebook', value: nb.name });
         if (name) data.renameNotebook(id, name);
+      } },
+      { label: 'Ekspor notebook', icon: icon('share'), run: () => {
+        const notes = data.listNotes('notebook', id);
+        if (!notes.length) { toast('Notebook ini masih kosong.'); return; }
+        exportSheet(notes, nb.name);
       } },
       { label: 'Hapus notebook', icon: icon('trash'), danger: true, run: async () => {
         const n = data.countIn('notebook', id);

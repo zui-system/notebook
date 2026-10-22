@@ -204,6 +204,88 @@ with sync_playwright() as p:
     n_after = page.evaluate("window.__zn.data.listNotes('semua').length")
     check("Semua template membuat catatan baru", n_after - n_before == 5, f"{n_before} → {n_after}")
 
+    # ================= 4. Ekspor =================
+    def grab(trigger):
+        with page.expect_download() as d:
+            trigger()
+        dl = d.value
+        return dl.suggested_filename, open(dl.path(), "rb").read()
+
+    obat = page.evaluate("window.__zn.data.listNotes('semua').find(n => n.title === 'Obat ibu').id")
+    page.goto(BASE + f"#/catatan/{obat}")
+    page.get_by_label("Judul catatan").wait_for()
+
+    def export_note(fmt):
+        page.get_by_role("button", name="Pilihan lain").click()
+        page.get_by_role("button", name="Ekspor catatan").click()
+        return grab(lambda: page.locator("dialog[open]").get_by_role("button", name=fmt).click())
+
+    name, raw = export_note("Markdown (.md)")
+    md = raw.decode("utf-8")
+    check("Gratis: ekspor satu catatan ke Markdown", name == "Obat ibu.md" and md.startswith("# Obat ibu") and "- [ ] Vitamin pagi (tenggat:" in md and "tiap hari" in md, md.splitlines()[0] if md else "")
+    name, raw = export_note("Teks (.txt)")
+    txt = raw.decode("utf-8")
+    check("Gratis: ekspor satu catatan ke teks", name == "Obat ibu.txt" and "[ ] Bayar listrik" in txt)
+
+    page.get_by_role("button", name="Pilihan lain").click()
+    page.get_by_role("button", name="Ekspor catatan").click()
+    sheet = page.locator("dialog[open]")
+    check("PDF dan Word diberi label Plus untuk paket Gratis", sheet.get_by_role("button", name="PDF").inner_text().endswith("Plus") and sheet.get_by_role("button", name="Word (.docx)").inner_text().endswith("Plus"))
+    page.screenshot(path="tests/shots/t2-09-export-sheet.png")
+    sheet.get_by_role("button", name="PDF").click()
+    page.get_by_role("heading", name="PDF tersedia di paket Plus").wait_for()
+    plus = page.locator("dialog[open]")
+    check("Gratis: PDF menampilkan penjelasan paket Plus (tidak mengunduh)", plus.get_by_text("PDF tersedia di paket Plus").count() == 1)
+    page.screenshot(path="tests/shots/t2-10-plus.png")
+    name, raw = grab(lambda: plus.get_by_role("button", name="Ekspor Markdown").click())
+    check("Dari penjelasan Plus bisa langsung ekspor Markdown", name.endswith(".md"))
+
+    # Paket Plus (dibaca dari field plan profil)
+    page.evaluate("window.__zn.data.getStore().profile.plan = 'plus'")
+    name, raw = export_note("PDF")
+    import pypdf
+    pdf = pypdf.PdfReader(io.BytesIO(raw))
+    ptxt = pdf.pages[0].extract_text()
+    check("Plus: ekspor PDF yang valid dan terbaca", name == "Obat ibu.pdf" and raw.startswith(b"%PDF-1.4") and "Obat ibu" in ptxt and "Vitamin pagi" in ptxt, f"{len(pdf.pages)} halaman, {len(raw)} byte")
+    name, raw = export_note("Word (.docx)")
+    import docx
+    d = docx.Document(io.BytesIO(raw))
+    paras = [p_.text for p_ in d.paragraphs]
+    check("Plus: ekspor Word (.docx) yang valid dan terbaca", name == "Obat ibu.docx" and paras[0] == "Obat ibu" and any("Vitamin pagi" in t for t in paras), str(paras[:3]))
+
+    # Notebook berisi banyak catatan, termasuk teks panjang: PDF berhalaman banyak
+    page.evaluate("""() => { const d = window.__zn.data; const nb = d.createNotebook('Kantor');
+      const long = Array.from({length: 120}, (_, i) => 'Baris ' + (i + 1) + ': rapat koordinasi — jadwal “minggu depan” é ü ñ ' + 'kata '.repeat(i % 12)).join('\\n');
+      d.createNote(d.blankNote({ title: 'Notulen panjang (a/b) [uji]', body: long, notebookId: nb }));
+      d.createNote(d.blankNote({ title: 'Ide', body: 'Satu baris saja', notebookId: nb }));
+      window.__nb = nb; }""")
+    nb = page.evaluate("window.__nb")
+    page.goto(BASE + f"#/notebook/{nb}")
+    page.get_by_role("heading", name="Kantor").wait_for()
+    page.get_by_role("button", name="Atur").click()
+    page.get_by_role("button", name="Ekspor notebook").click()
+    name, raw = grab(lambda: page.locator("dialog[open]").get_by_role("button", name="PDF").click())
+    pdf = pypdf.PdfReader(io.BytesIO(raw))
+    alltxt = "\n".join(pg.extract_text() for pg in pdf.pages)
+    check("Ekspor satu notebook ke PDF (berhalaman, huruf khusus aman)", name == "Kantor.pdf" and len(pdf.pages) >= 3 and "Baris 120" in alltxt and "Satu baris saja" in alltxt and "“minggu depan”" in alltxt, f"{len(pdf.pages)} halaman")
+    page.get_by_role("button", name="Atur").click()
+    page.get_by_role("button", name="Ekspor notebook").click()
+    name, raw = grab(lambda: page.locator("dialog[open]").get_by_role("button", name="Markdown (.md)").click())
+    md = raw.decode("utf-8")
+    check("Ekspor satu notebook ke Markdown", name == "Kantor.md" and md.startswith("# Kantor") and "## Ide" in md)
+
+    # Semua catatan: selalu gratis
+    page.evaluate("window.__zn.data.getStore().profile.plan = 'free'")
+    page.goto(BASE + "#/pengaturan")
+    page.get_by_role("heading", name="Ekspor", exact=True).wait_for()
+    name, raw = grab(lambda: page.get_by_role("button", name="Ekspor semua catatan").click())
+    z = zipfile.ZipFile(io.BytesIO(raw))
+    names = z.namelist()
+    total = page.evaluate("window.__zn.data.allNotes().filter(n => !n.deletedAt).length")
+    mds = [n for n in names if n.endswith(".md")]
+    snap = json.loads(z.read("data-lengkap.json"))
+    check("Gratis: ekspor SEMUA catatan (.zip Markdown + data lengkap)", z.testzip() is None and len(mds) == total and "Kantor/Ide.md" in names and len(snap["notes"]) >= total, f"{len(mds)} file .md")
+
     page.screenshot(path="tests/shots/t2-99-end.png")
     check("Tidak ada error JavaScript", not errors, "; ".join(errors[:3]))
     browser.close()

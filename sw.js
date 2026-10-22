@@ -28,6 +28,8 @@ const SHELL = [
   'js/views/settings.js',
   'js/views/due.js',
   'js/views/agenda.js',
+  'js/views/share.js',
+  'js/export.js',
   'icons/icon.svg',
   'icons/icon-192.png',
   'icons/icon-512.png'
