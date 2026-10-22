@@ -44,4 +44,4 @@ export const LIMITS = {
   trashDays: 30
 };
 
-export const APP_VERSION = '1.0.1';
+export const APP_VERSION = '2.0.0';

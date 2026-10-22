@@ -303,7 +303,7 @@ mark { background: var(--accent-soft); color: inherit; border-radius: 3px; paddi
 .editor .title:focus-visible, .editor .body:focus-visible { outline: none; }
 .editor .chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 2px 0 10px; }
 .editor .chips .tagchip { min-height: 34px; }
-.editor .chips button.tagchip { cursor: pointer; }
+.editor .chips button.tagchip { cursor: pointer; min-height: 44px; }
 .tagchip svg { width: 1rem; height: 1rem; flex: none; }
 .banner { background: var(--surface-2); border: var(--border-w) solid var(--line); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
 .banner p { margin: 0; }

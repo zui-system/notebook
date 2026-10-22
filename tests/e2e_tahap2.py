@@ -286,6 +286,100 @@ with sync_playwright() as p:
     snap = json.loads(z.read("data-lengkap.json"))
     check("Gratis: ekspor SEMUA catatan (.zip Markdown + data lengkap)", z.testzip() is None and len(mds) == total and "Kantor/Ide.md" in names and len(snap["notes"]) >= total, f"{len(mds)} file .md")
 
+    # ================= 5. Aksesibilitas layar baru =================
+    def sweep(label):
+        info = page.evaluate("""() => [...document.querySelectorAll('button, a.menu-item, [role=switch], input[type=checkbox], input[type=radio]')]
+          .filter(b => { const host = b.closest('label') || b; const r = host.getBoundingClientRect(); return r.width && r.height && (!document.querySelector('dialog[open]') || b.closest('dialog[open]')); })
+          .map(b => { const host = (b.type === 'checkbox' || b.type === 'radio') ? (b.closest('label') || b) : b; const r = host.getBoundingClientRect();
+            const lbl = b.labels && b.labels.length ? [...b.labels].map(l => l.innerText).join(' ') : '';
+            return { name: (b.getAttribute('aria-label') || b.innerText || lbl || '').trim(), h: r.height, cls: b.className }; })""")
+        return label, [i for i in info if not i["name"]], [i for i in info if i["h"] < 44]
+    problems = []
+    page.goto(BASE + f"#/catatan/{obat}")
+    page.get_by_label("Judul catatan").wait_for()
+    problems.append(sweep("checklist bertanggal"))
+    page.get_by_role("button", name="Ubah tanggal item 2").click()
+    problems.append(sweep("dialog tanggal"))
+    page.keyboard.press("Escape")
+    for route in ["hari-ini", "akan-datang", "pengaturan"]:
+        page.goto(BASE + "#/" + route)
+        page.wait_for_timeout(300)
+        problems.append(sweep(route))
+    page.goto(BASE + "#/")
+    page.locator(".home h1").wait_for()
+    page.locator("#btn-new").click()
+    page.locator(".templates .tpl").first.wait_for()
+    problems.append(sweep("template"))
+    bad = [(l, u[:2], sm[:2]) for l, u, sm in problems if u or sm]
+    check("Layar baru: semua kontrol punya nama dan setinggi minimal 44 px", not bad, json.dumps(bad, ensure_ascii=False)[:300])
+    page.get_by_role("button", name="Kembali").click()
+
+    pairs = {}
+    for theme in ["terang", "gelap", "ceria"]:
+        for hc in ["normal", "tinggi"]:
+            pairs[f"{theme}/{hc}"] = page.evaluate(f"""() => {{ const r = document.documentElement; r.dataset.theme='{theme}'; r.dataset.contrast='{hc}';
+              const s = getComputedStyle(r); const g = n => s.getPropertyValue(n).trim();
+              const lum = hex => {{ const v = [1,3,5].map(i => parseInt(hex.slice(i, i+2), 16) / 255).map(c => c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4); return 0.2126*v[0] + 0.7152*v[1] + 0.0722*v[2]; }};
+              const ratio = (a, b) => {{ const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); }};
+              return Math.min(ratio(g('--danger'), g('--bg')), ratio(g('--danger'), g('--surface')), ratio(g('--accent'), g('--bg')), ratio(g('--muted'), g('--surface'))); }}""")
+    page.evaluate("() => { const r = document.documentElement; r.dataset.theme='terang'; r.dataset.contrast='normal'; }")
+    worst = min(pairs.values())
+    check("Kontras teks terlambat/aksen/redup ≥ 4.5:1 di 3 tema + kontras tinggi", worst >= 4.5, f"terendah {worst:.1f}:1")
+
+    # ================= 6. Kecepatan =================
+    page.evaluate("""() => { const d = window.__zn.data; const t = d.startOfDay();
+      for (let i = 0; i < 500; i++) d.createNote(d.blankNote({ title: 'Tugas ' + i, type: 'checklist',
+        items: [{ id: 'x' + i, text: 'Kerjakan bagian ' + i, done: false, due: d.addDays(t, i % 40 - 5), hasTime: i % 2 === 0, repeat: i % 7 === 0 ? 'mingguan' : null, remind: i % 3 === 0 }] })); }""")
+    page.wait_for_timeout(2000)
+    ms = page.evaluate("""() => { const d = window.__zn.data; const t0 = performance.now();
+      for (let i = 0; i < 10; i++) { d.agenda(); d.desiredReminders(); } return (performance.now() - t0) / 10; }""")
+    check("Hari ini/pengingat dihitung cepat dengan 500+ catatan bertanggal", ms < 30, f"{ms:.1f} ms")
+    page.goto(BASE + "#/akan-datang")
+    t = time.time()
+    page.reload()
+    page.locator(".agrow").first.wait_for()
+    ag_ms = (time.time() - t) * 1000
+    check("Akan datang (500+ tugas) tampil < 1 detik setelah dibuka ulang", ag_ms < 1000, f"{ag_ms:.0f} ms, {page.locator('.agrow').count()} tugas")
+    page.goto(BASE + "#/")
+    times = []
+    for _ in range(3):
+        t = time.time()
+        page.reload()
+        page.locator(".home h1").wait_for()
+        times.append((time.time() - t) * 1000)
+    loaded = page.evaluate("performance.getEntriesByType('resource').map(r => r.name)")
+    js_kb = page.evaluate("performance.getEntriesByType('resource').filter(r => /\\.(js|css)$/.test(r.name)).reduce((a, r) => a + (r.decodedBodySize || 0), 0) / 1024")
+    check("Beranda siap < 1 detik (muat ulang, 500+ catatan)", max(times) < 1000, f"{min(times):.0f}–{max(times):.0f} ms; JS+CSS awal {js_kb:.0f} KB")
+    check("Modul ekspor tidak dimuat saat aplikasi dibuka", not any(n.endswith("/export.js") for n in loaded))
+
+    # ================= 7. Offline =================
+    ctx.set_offline(True)
+    page.reload()
+    page.locator(".home h1").wait_for(timeout=8000)
+    page.locator("#btn-new").click()
+    page.get_by_role("button", name="Daftar belanja").click()
+    page.wait_for_timeout(300)
+    page.get_by_role("button", name="Atur tanggal item 1").click()
+    dlg = page.locator("dialog[open]")
+    import datetime
+    soon = (datetime.datetime.now() + datetime.timedelta(minutes=1)).strftime("%H:%M")
+    dlg.get_by_label("Jam (boleh kosong)").fill(soon)
+    dlg.get_by_role("button", name="Simpan").click()
+    page.wait_for_timeout(500)
+    belanja = page.evaluate("window.__zn.data.listNotes('semua').find(n => n.title === 'Belanja')")
+    check("Offline: template dan tanggal pengingat tersimpan", belanja and belanja["items"][0].get("remind") is True)
+    # Majukan jadwal agar tidak menunggu satu menit penuh
+    page.evaluate("""() => { const d = window.__zn.data; const n = d.listNotes('semua').find(n => n.title === 'Belanja');
+      d.updateItem(n.id, n.items[0].id, it => { it.due = Date.now() + 2000; }); d.syncReminders(); }""")
+    page.wait_for_timeout(3500)
+    off_note = page.evaluate("navigator.serviceWorker.ready.then(r => r.getNotifications()).then(l => l.some(n => n.title === 'Beras 5 kg'))")
+    check("Offline: notifikasi pengingat tetap muncul tepat waktu", off_note)
+    page.get_by_role("button", name="Pilihan lain").click()
+    page.get_by_role("button", name="Ekspor catatan").click()
+    name, raw = grab(lambda: page.locator("dialog[open]").get_by_role("button", name="Markdown (.md)").click())
+    check("Offline: ekspor tetap bisa", name == "Belanja.md" and b"- [ ] Beras 5 kg" in raw)
+    ctx.set_offline(False)
+
     page.screenshot(path="tests/shots/t2-99-end.png")
     check("Tidak ada error JavaScript", not errors, "; ".join(errors[:3]))
     browser.close()
