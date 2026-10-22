@@ -18,6 +18,7 @@ const SHELL = [
   'js/firebase.js',
   'js/store/local.js',
   'js/store/cloud.js',
+  'js/store/outbox.js',
   'js/views/auth.js',
   'js/views/dialogs.js',
   'js/views/drawer.js',

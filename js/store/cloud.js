@@ -149,16 +149,49 @@ export class CloudStore {
     return this.write(this.fb.F.updateDoc(this.profileRef(), { settings: this.profile.settings, updatedAt: this.fb.F.serverTimestamp() }));
   }
 
-  // ---- Gambar lampiran ----
-  async uploadImage(noteId, blob) {
-    const fb = await loadStorage();
-    const name = Date.now().toString(36) + Math.random().toString(36).slice(2, 8) + '.jpg';
-    const path = `users/${this.uid}/attachments/${noteId}/${name}`;
-    const r = fb.S.ref(fb.storage, path);
-    await fb.S.uploadBytes(r, blob, { contentType: 'image/jpeg' });
-    const url = await fb.S.getDownloadURL(r);
-    return { path, url, size: blob.size };
+  // ---- Foto lampiran ----
+  attachmentPath(noteId, id) { return `users/${this.uid}/attachments/${noteId}/${id}.jpg`; }
+
+  // Mencatat foto di kuota (satu batch: data lampiran + kenaikan pemakaian). Server menolak
+  // bila melewati batas paket; error itu diberi kode 'quota'.
+  async registerAttachment(e) {
+    const F = this.fb.F;
+    const b = F.writeBatch(this.fb.db);
+    b.set(this.ref('attachments', e.id), { noteId: e.noteId, path: e.path, size: e.size, contentType: 'image/jpeg', createdAt: e.createdAt });
+    b.update(this.profileRef(), { 'usage.bytes': F.increment(e.size), 'usage.files': F.increment(1), 'usage.lastAttId': e.id, updatedAt: F.serverTimestamp() });
+    try {
+      await withTimeout(b.commit(), 30000);
+    } catch (err) {
+      if (err && err.code === 'permission-denied') {
+        // Bisa jadi sudah tercatat oleh percobaan sebelumnya yang terputus.
+        const snap = await F.getDocFromServer(this.ref('attachments', e.id)).catch(() => null);
+        if (snap && snap.exists()) return;
+        const q = new Error('Kuota foto penuh');
+        q.code = 'quota';
+        throw q;
+      }
+      throw err;
+    }
   }
+
+  async uploadAttachment(e) {
+    const fb = await loadStorage();
+    const r = fb.S.ref(fb.storage, e.path);
+    await withTimeout(fb.S.uploadBytes(r, e.blob, { contentType: 'image/jpeg' }), 120000);
+    return fb.S.getDownloadURL(r);
+  }
+
+  // Menghapus foto: data lampiran + pengurangan kuota dalam satu batch, lalu filenya.
+  async deleteAttachment(a) {
+    const F = this.fb.F;
+    const b = F.writeBatch(this.fb.db);
+    b.delete(this.ref('attachments', a.id));
+    b.update(this.profileRef(), { 'usage.bytes': F.increment(-a.size), 'usage.files': F.increment(-1), 'usage.lastAttId': a.id, updatedAt: F.serverTimestamp() });
+    // Ditolak bila foto belum pernah tercatat (mis. masih menunggu di perangkat lain): abaikan.
+    b.commit().catch(err => { if (!err || err.code !== 'permission-denied') this.onError(err); });
+    if (navigator.onLine) await this.deleteFile(a.path);
+  }
+
   async deleteFile(path) {
     try {
       const fb = await loadStorage();
@@ -197,6 +230,10 @@ export class CloudStore {
   }
 
   close() { this.unsubs.forEach(u => { try { u(); } catch {} }); this.unsubs = []; }
+}
+
+function withTimeout(promise, ms) {
+  return Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('Waktu habis')), ms))]);
 }
 
 export { PROFILE_KEYS };

@@ -2,7 +2,7 @@
 import { h, icon, iconButton, clear, toast, fmtDateTime, fmtDue } from '../dom.js';
 import * as data from '../data.js';
 import { go, back } from '../nav.js';
-import { confirmDialog, promptDialog, menuSheet } from './dialogs.js';
+import { confirmDialog, promptDialog, menuSheet, openDialog } from './dialogs.js';
 import { dueDialog, applyDue, dueLine, prepareNotifications } from './due.js';
 
 function autoGrow(el) {
@@ -32,8 +32,14 @@ export function editorView(id, { notebookId = null } = {}) {
       history.replaceState(null, '', '#/catatan/' + noteId);
       renderToolbar();
     } else {
-      data.saveNote(noteId, draft);
+      saveDraft();
     }
+  }
+  // Foto dikelola terpisah (unggahan berjalan di belakang layar), jadi selalu pakai versi tersimpan.
+  function saveDraft() {
+    const cur = data.getNote(noteId);
+    if (cur) draft.attachments = structuredClone(cur.attachments || []);
+    data.saveNote(noteId, draft);
   }
   function changed() {
     dirty = true;
@@ -192,17 +198,42 @@ export function editorView(id, { notebookId = null } = {}) {
     else if (draft.type === 'checklist') addItem(0);
   }
 
+  const blobUrls = new Map();
   function renderAttachments() {
     clear(attachments);
     const list = draft.attachments || [];
     if (!list.length) return;
-    attachments.appendChild(h('div', { class: 'attachments' }, list.map((a, i) => h('figure', null,
-      h('img', { src: a.url, alt: `Gambar ${i + 1}`, loading: 'lazy' }),
-      inTrash() ? null : h('figcaption', null, iconButton({ icon: 'trash', label: `Hapus gambar ${i + 1}`, onClick: async () => {
-        const ok = await confirmDialog({ title: 'Hapus gambar?', message: 'Gambar ini akan dihapus dari catatan.', ok: 'Hapus gambar', danger: true });
-        if (ok) { await data.removeImage(noteId, a.path); draft.attachments = data.getNote(noteId).attachments; renderAttachments(); }
-      } }))
-    ))));
+    attachments.appendChild(h('div', { class: 'attachments' }, list.map((a, i) => {
+      const img = h('img', { alt: `Foto ${i + 1}`, loading: 'lazy' });
+      const fig = h('figure', { class: a.pending ? 'pending' : null },
+        h('button', { type: 'button', class: 'thumb', 'aria-label': `Lihat foto ${i + 1}`, onClick: () => viewPhoto(img.src, i) }, img),
+        a.pending ? h('span', { class: 'wait' }, 'Menunggu internet…') : null,
+        inTrash() ? null : h('figcaption', null, iconButton({ icon: 'trash', label: `Hapus foto ${i + 1}`, onClick: async () => {
+          const ok = await confirmDialog({ title: 'Hapus foto?', message: 'Foto ini akan dihapus dari catatan.', ok: 'Hapus foto', danger: true });
+          if (ok) { await data.removeImage(noteId, a.path); draft.attachments = data.getNote(noteId).attachments; renderAttachments(); }
+        } }))
+      );
+      if (a.url) img.src = a.url;
+      else showPending(a, img, fig);
+      return fig;
+    })));
+  }
+
+  // Foto yang belum terunggah: tampilkan salinan dari perangkat ini bila ada.
+  async function showPending(a, img, fig) {
+    if (blobUrls.has(a.id)) { img.src = blobUrls.get(a.id); return; }
+    const blob = await data.pendingBlob(a.id);
+    if (blob) { const u = URL.createObjectURL(blob); blobUrls.set(a.id, u); img.src = u; }
+    else { fig.classList.add('elsewhere'); fig.querySelector('.wait').textContent = 'Sedang diunggah dari perangkat lain'; }
+  }
+
+  function viewPhoto(src, i) {
+    if (!src) return;
+    openDialog(({ close, titleId }) => h('div', { class: 'dlg viewer' },
+      h('h2', { id: titleId, class: 'sr-only' }, `Foto ${i + 1}`),
+      h('img', { src, alt: `Foto ${i + 1}` }),
+      h('div', { class: 'buttons' }, h('button', { type: 'button', class: 'btn block', autofocus: true, onClick: () => close() }, 'Tutup'))
+    ), { cls: 'photo' });
   }
 
   function renderFooter() {
@@ -268,24 +299,34 @@ export function editorView(id, { notebookId = null } = {}) {
   function pickImage() {
     const store = data.getStore();
     if (!store.canAttach) {
-      toast('Masuk dengan akun untuk menambah gambar.');
+      toast('Masuk dengan akun untuk menambah foto.');
       return;
     }
-    const input = h('input', { type: 'file', accept: 'image/*', style: 'display:none' });
+    menuSheet({
+      title: 'Tambah foto',
+      items: [
+        { label: 'Ambil foto dengan kamera', icon: icon('camera'), run: () => chooseFiles(true) },
+        { label: 'Pilih dari galeri', icon: icon('image'), run: () => chooseFiles(false) }
+      ]
+    });
+  }
+
+  function chooseFiles(camera) {
+    const input = h('input', { type: 'file', accept: 'image/*', capture: camera ? 'environment' : null, multiple: camera ? null : true, style: 'display:none' });
     input.addEventListener('change', async () => {
-      const file = input.files && input.files[0];
+      const files = [...(input.files || [])];
       input.remove();
-      if (!file) return;
-      try {
-        const id = await ensureSaved();
-        toast('Mengunggah gambar…');
-        await data.addImage(id, file);
-        draft.attachments = data.getNote(id).attachments;
-        renderAttachments();
-        toast('Gambar ditambahkan.');
-      } catch (e) {
-        toast(e.message || 'Gambar gagal ditambahkan.');
+      if (!files.length) return;
+      const id = await ensureSaved();
+      let added = 0;
+      toast(files.length > 1 ? `Menyiapkan ${files.length} foto…` : 'Menyiapkan foto…');
+      for (const file of files) {
+        try { await data.addImage(id, file); added++; }
+        catch (e) { toast(e.message || 'Foto gagal ditambahkan.'); break; }
       }
+      draft.attachments = data.getNote(id).attachments;
+      renderAttachments();
+      if (added) toast(navigator.onLine ? (added > 1 ? `${added} foto ditambahkan.` : 'Foto ditambahkan.') : 'Foto disimpan di perangkat dan akan diunggah saat online.');
     });
     document.body.appendChild(input);
     input.click();
@@ -297,7 +338,7 @@ export function editorView(id, { notebookId = null } = {}) {
       items: [
         { label: 'Pindah ke notebook', icon: icon('book'), run: chooseNotebook },
         { label: 'Atur tag', icon: icon('tag'), run: editTags },
-        { label: 'Tambah gambar', icon: icon('image'), run: pickImage },
+        { label: 'Tambah foto', icon: icon('camera'), run: pickImage },
         { label: draft.archived ? 'Keluarkan dari arsip' : 'Arsipkan', icon: icon('archive'), run: async () => {
           await ensureSaved();
           const archived = !draft.archived;
@@ -310,7 +351,7 @@ export function editorView(id, { notebookId = null } = {}) {
           if (!ok) return;
           clearTimeout(timer); dirty = false;
           if (noteId) {
-            data.saveNote(noteId, draft);
+            saveDraft();
             data.trashNote(noteId);
             const deletedId = noteId;
             toast('Catatan dipindah ke tempat sampah.', { label: 'Batalkan', run: () => data.restoreNote(deletedId) });
@@ -342,8 +383,14 @@ export function editorView(id, { notebookId = null } = {}) {
         else { title.value = draft.title; refreshAll(); }
       } else {
         renderChips();
+        // Foto selesai diunggah (atau dihapus dari perangkat lain).
+        if (JSON.stringify(fresh.attachments || []) !== JSON.stringify(draft.attachments || [])) {
+          draft.attachments = structuredClone(fresh.attachments || []);
+          renderAttachments();
+        }
       }
     },
+    // Juga dipanggil saat aplikasi disembunyikan (mis. membuka kamera), jadi foto sementara tetap disimpan.
     destroy: flush
   };
 }

@@ -154,5 +154,7 @@ export function fmtDayHeading(ms) {
 export function fmtSize(bytes) {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' KB';
-  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+  const n = x => x.toLocaleString('id-ID', { maximumFractionDigits: 1 });
+  if (bytes < 1024 * 1024 * 1024) return n(bytes / 1024 / 1024) + ' MB';
+  return n(bytes / 1024 / 1024 / 1024) + ' GB';
 }

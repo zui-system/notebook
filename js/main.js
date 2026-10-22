@@ -187,6 +187,7 @@ function enterApp() {
   mount(h('div', { class: 'shell' }, topSlot, main));
   shell = { topSlot, main };
   data.onData(() => render());
+  data.onNotice(msg => toast(msg));
   render(true);
   setTimeout(() => data.autoBackup(), 4000);
   // Perangkat yang sudah mengizinkan notifikasi: perbarui alamat notifikasinya bila berubah.
